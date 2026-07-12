@@ -12,6 +12,7 @@ import omiMark from '../assets/omi-logo.png'
 import { maybeStartScreenSynthesis } from '../lib/screenSynthesis'
 import { maybeStartInsightEngine } from '../lib/insightEngine'
 import { maybeStartRetentionSweep } from '../lib/retentionSweep'
+import { nextOverflowing } from './homeScroll'
 
 function firstName(u: User | null): string {
   const display = u?.displayName?.trim().split(/\s+/)[0]
@@ -265,7 +266,7 @@ export function Home(): React.JSX.Element {
     if (isInitialReveal || scrollModeRef.current === 'followingBottom') {
       scrollToLatest({ smooth: isNewMessage && !isInitialReveal })
     }
-    setOverflowing(el.scrollHeight > el.clientHeight + 4)
+    setOverflowing((prev) => nextOverflowing(prev, el.scrollHeight, el.clientHeight))
   }, [chat.history, chat.sending, showThread, scrollToLatest, widgetsReady, widgetsH])
 
   // Reveal an older page when the user scrolls near the top, capturing the
@@ -273,17 +274,14 @@ export function Home(): React.JSX.Element {
   const onThreadScroll = (): void => {
     const el = chatScrollRef.current
     if (!el) return
-    setOverflowing(el.scrollHeight > el.clientHeight + 4)
+    setOverflowing((prev) => nextOverflowing(prev, el.scrollHeight, el.clientHeight))
     const distFromBottom = el.scrollHeight - el.scrollTop - el.clientHeight
     if (distFromBottom <= 8) {
       // Resume live following when the reader scrolls back to the live edge.
       if (scrollModeRef.current !== 'followingBottom') {
         setScrollMode('followingBottom')
       }
-    } else if (
-      scrollModeRef.current === 'followingBottom' &&
-      !isProgrammaticScrollRef.current
-    ) {
+    } else if (scrollModeRef.current === 'followingBottom' && !isProgrammaticScrollRef.current) {
       // Release following when the viewport moves away from the live edge via
       // a non-programmatic scroll (scrollbar thumb drag, keyboard arrows, etc).
       // onWheel/onTouchMove already cover wheel/touch; this covers the rest.
@@ -353,7 +351,11 @@ export function Home(): React.JSX.Element {
           onWheel={(e) => releaseFollowingIfScrolledAway(e)}
           onTouchMove={() => releaseFollowingIfScrolledAway()}
           className="h-full overflow-y-auto"
-          style={{ WebkitMaskImage: mask, maskImage: mask }}
+          // Reserve the scrollbar gutter on BOTH edges so the vertical scrollbar
+          // appearing/disappearing as the thread opens can't shrink the content box
+          // and shift the horizontally-centered bubbles (mx-auto) — that on/off
+          // shift is what read as the chat "vibrating" as it opened.
+          style={{ WebkitMaskImage: mask, maskImage: mask, scrollbarGutter: 'stable both-edges' }}
         >
           <div className="mx-auto flex min-h-full w-full max-w-4xl flex-col">
             <div className="mt-auto space-y-2 pb-2">
