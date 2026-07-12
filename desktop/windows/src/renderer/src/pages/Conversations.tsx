@@ -8,6 +8,7 @@ import {
   Share2,
   CheckSquare,
   Check,
+  Loader2,
   MessageSquare,
   Radio
 } from 'lucide-react'
@@ -82,7 +83,9 @@ export function Conversations(): React.JSX.Element {
   const [selectMode, setSelectMode] = useState(false)
   const [selected, setSelected] = useState<Set<string>>(new Set())
   const [deleting, setDeleting] = useState(false)
-  const [pendingDelete, setPendingDelete] = useState<{ ids: string[]; timeout: number } | null>(null)
+  const [pendingDelete, setPendingDelete] = useState<{ ids: string[]; timeout: number } | null>(
+    null
+  )
   const pendingTimeoutRef = useRef<number | null>(null)
 
   const loadAll = useCallback(async (): Promise<void> => {
@@ -101,7 +104,10 @@ export function Conversations(): React.JSX.Element {
           title: c.structured?.title || 'Untitled conversation',
           emoji: c.structured?.emoji || undefined,
           subtitle: c.created_at ? new Date(c.created_at).toLocaleString() : '',
-          preview: c.structured?.overview || summarize(c.transcript_segments).slice(0, 200) || '(no transcript)',
+          preview:
+            c.structured?.overview ||
+            summarize(c.transcript_segments).slice(0, 200) ||
+            '(no transcript)',
           source: 'cloud',
           sortAt: created
         })
@@ -172,7 +178,9 @@ export function Conversations(): React.JSX.Element {
     if (filter === 'recording' && r.localKind !== 'recording') return false
     if (query.trim()) {
       const q = query.trim().toLowerCase()
-      return (r.title?.toLowerCase() ?? '').includes(q) || (r.preview?.toLowerCase() ?? '').includes(q)
+      return (
+        (r.title?.toLowerCase() ?? '').includes(q) || (r.preview?.toLowerCase() ?? '').includes(q)
+      )
     }
     return true
   })
@@ -182,6 +190,9 @@ export function Conversations(): React.JSX.Element {
     for (const id of ids) {
       const row = rows.find((r) => r.id === id)
       if (!row) continue
+      // Optimistic placeholder — no server document exists to delete; it reconciles
+      // away on its own once the real conversation lands.
+      if (row.pending) continue
       try {
         if (row.source === 'local') {
           await window.omi.deleteLocalConversation(id)
@@ -238,7 +249,9 @@ export function Conversations(): React.JSX.Element {
     <div className="flex h-full flex-col">
       <PageHeader
         title="Conversations"
-        subtitle={loading ? 'Loading…' : `${rows.length} conversation${rows.length === 1 ? '' : 's'}`}
+        subtitle={
+          loading ? 'Loading…' : `${rows.length} conversation${rows.length === 1 ? '' : 's'}`
+        }
         actions={
           <button
             onClick={() => navigate('/conversations/live')}
@@ -389,7 +402,30 @@ export function Conversations(): React.JSX.Element {
               const checked = selected.has(r.id)
               return (
                 <li key={r.id}>
-                  {selectMode ? (
+                  {r.pending ? (
+                    // Optimistic placeholder — no server conversation exists yet, so
+                    // opening it would 404 and it can't be deleted/shared server-side.
+                    // Render a non-navigable, non-selectable "Processing" card (even in
+                    // select mode); the real conversation replaces it within seconds.
+                    <div className="surface-card cursor-default p-5 opacity-70">
+                      <div className="flex items-start justify-between gap-3">
+                        <div className="font-display text-lg font-semibold leading-tight text-text-primary">
+                          {r.emoji && <span className="mr-1.5">{r.emoji}</span>}
+                          {r.title || <span className="italic text-text-tertiary">loading…</span>}
+                        </div>
+                        <span className="badge flex shrink-0 items-center gap-1.5">
+                          <Loader2 className="h-3 w-3 animate-spin" aria-hidden />
+                          Processing
+                        </span>
+                      </div>
+                      {r.subtitle && (
+                        <div className="mt-1 text-xs text-text-quaternary">{r.subtitle}</div>
+                      )}
+                      <p className="mt-2.5 line-clamp-2 text-sm leading-relaxed text-text-tertiary">
+                        {r.preview}
+                      </p>
+                    </div>
+                  ) : selectMode ? (
                     <button
                       onClick={() => {
                         setSelected((s) => {
@@ -463,7 +499,8 @@ export function Conversations(): React.JSX.Element {
       {pendingDelete && (
         <div className="glass-strong mx-6 mb-4 flex items-center justify-between rounded-2xl px-4 py-3 lg:mx-10">
           <span className="text-sm text-white/80">
-            {pendingDelete.ids.length} conversation{pendingDelete.ids.length !== 1 ? 's' : ''} will be deleted in 5s
+            {pendingDelete.ids.length} conversation{pendingDelete.ids.length !== 1 ? 's' : ''} will
+            be deleted in 5s
           </span>
           <button
             onClick={undoDelete}
