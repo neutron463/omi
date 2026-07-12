@@ -3,6 +3,9 @@ import { startTranscription, type TranscriptionHandle } from '../lib/transcripti
 import type { TranscriptLine } from '../../../shared/types'
 import {
   HOLD_THRESHOLD_MS,
+  RELEASE_WATCHDOG_MS,
+  RECORDING_HARD_CAP_MS,
+  createReleaseWatchdog,
   assembleTranscript,
   upsertLine,
   shouldFinalize,
@@ -115,6 +118,19 @@ export function usePushToTalk(opts: Options): PushToTalk {
   // Poll timer for the finalize phase.
   const pollTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null)
 
+  // Latest `finishRecording`, declared early so the release watchdog's onRelease
+  // (below) and the once-registered window listeners all call the current one
+  // instead of a stale closure. Assigned each render after finishRecording.
+  const finishRecordingRef = useRef<(commit: boolean) => void>(() => {})
+
+  // The terminating Space keyup can be swallowed by the global summon chord
+  // (release Space while the modifier is still held), stranding the recording on
+  // the "Listening…" visualizer forever. The watchdog instead detects release from
+  // the held key's auto-repeat keydowns going quiet, with a hard-cap backstop — see
+  // createReleaseWatchdog. Built in a mount effect (not during render) and read via
+  // the ref at event/timer time; onRelease commits through the latest ref.
+  const watchdogRef = useRef<ReturnType<typeof createReleaseWatchdog> | null>(null)
+
   // Mic audio graph (a second stream, independent of transcription's), feeding both
   // the waveform and the VAD.
   const analyserRef = useRef<AnalyserNode | null>(null)
@@ -202,6 +218,7 @@ export function usePushToTalk(opts: Options): PushToTalk {
   // session so any in-flight async work tears itself down.
   const teardownTranscription = (): void => {
     clearPoll()
+    watchdogRef.current?.stop()
     finalizingRef.current = false
     setFinalizing(false)
     stopAudioViz()
@@ -226,6 +243,9 @@ export function usePushToTalk(opts: Options): PushToTalk {
     recordingRef.current = true
     setRecording(true)
     setError(null)
+    // Arm the release watchdog + hard cap so the "Listening…" visualizer can never
+    // hang even if the terminating keyup is lost (see createReleaseWatchdog).
+    watchdogRef.current?.begin()
     // Take back the space(s) auto-repeat inserted while holding, then clear the box
     // so the recognized transcript renders into it cleanly.
     restoreDraft(snapshotRef.current)
@@ -280,6 +300,9 @@ export function usePushToTalk(opts: Options): PushToTalk {
     if (!recordingRef.current) return
     recordingRef.current = false
     setRecording(false)
+    // Recording is over — disarm the release watchdog / hard cap regardless of how
+    // we got here (keyup, watchdog, hard cap, or cancel).
+    watchdogRef.current?.stop()
 
     if (!commit) {
       teardownTranscription() // also stops the audio viz
@@ -340,7 +363,9 @@ export function usePushToTalk(opts: Options): PushToTalk {
   const onKeyDown = (e: React.KeyboardEvent): boolean => {
     if (!isSpace(e)) return false
     if (recordingRef.current) {
-      // Block the auto-repeat spaces from leaking into the (hidden) input.
+      // Block the auto-repeat spaces from leaking into the (hidden) input, and
+      // treat each repeat as proof the key is still held (feeds the release watchdog).
+      watchdogRef.current?.noteRepeat()
       e.preventDefault()
       return true
     }
@@ -393,12 +418,28 @@ export function usePushToTalk(opts: Options): PushToTalk {
   const startRecordingRef = useRef(startRecording)
   // eslint-disable-next-line react-hooks/refs -- intentional latest-ref / lazy-init (reads newest value in once-registered listeners & imperative loops, avoids stale closures)
   startRecordingRef.current = startRecording
-  const finishRecordingRef = useRef(finishRecording)
+  // finishRecordingRef is declared with the refs above (the release watchdog calls
+  // it); just refresh it to this render's closure.
   // eslint-disable-next-line react-hooks/refs -- intentional latest-ref / lazy-init (reads newest value in once-registered listeners & imperative loops, avoids stale closures)
   finishRecordingRef.current = finishRecording
   const getDraftRef = useRef(opts.getDraft)
   // eslint-disable-next-line react-hooks/refs -- intentional latest-ref / lazy-init (reads newest value in once-registered listeners & imperative loops, avoids stale closures)
   getDraftRef.current = opts.getDraft
+
+  // Build the release watchdog once, in an effect (never during render, which would
+  // read refs / call the impure clock at render time). onRelease commits through
+  // the latest-ref so it always ends the CURRENT recording session.
+  useEffect(() => {
+    watchdogRef.current = createReleaseWatchdog({
+      watchdogMs: RELEASE_WATCHDOG_MS,
+      hardCapMs: RECORDING_HARD_CAP_MS,
+      setTimer: (fn, ms) => setTimeout(fn, ms),
+      clearTimer: clearTimeout,
+      onRelease: () => finishRecordingRef.current(true)
+    })
+    const wd = watchdogRef.current
+    return () => wd.stop()
+  }, [])
 
   useEffect(() => {
     const inTextField = (): boolean => {
@@ -409,6 +450,7 @@ export function usePushToTalk(opts: Options): PushToTalk {
     const onDown = (e: KeyboardEvent): void => {
       if (!isSpaceKey(e) || inTextField()) return // the textarea path owns it when focused
       if (recordingRef.current) {
+        watchdogRef.current?.noteRepeat() // each repeat proves the key is still held
         e.preventDefault() // swallow auto-repeat spaces while recording
         return
       }
@@ -447,6 +489,7 @@ export function usePushToTalk(opts: Options): PushToTalk {
     return () => {
       if (holdTimerRef.current !== null) clearTimeout(holdTimerRef.current)
       clearPoll()
+      watchdogRef.current?.stop()
       stopAudioViz()
       try {
         handleRef.current?.stop()
@@ -456,7 +499,6 @@ export function usePushToTalk(opts: Options): PushToTalk {
       handleRef.current = null
       sessionRef.current++
     }
-    // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
   return { recording, finalizing, error, analyserRef, onKeyDown, onKeyUp, cancel }

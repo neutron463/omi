@@ -4,6 +4,7 @@ import {
   assembleTranscript,
   upsertLine,
   shouldFinalize,
+  createReleaseWatchdog,
   HOLD_THRESHOLD_MS,
   type FinalizeConfig
 } from './pushToTalk'
@@ -130,9 +131,9 @@ describe('shouldFinalize', () => {
   })
 
   it('does not commit while the user is still speaking', () => {
-    expect(shouldFinalize({ ...base, silentForMs: CFG.silenceMs - 1, sinceLastSegmentMs: 9999 }, CFG)).toBe(
-      false
-    )
+    expect(
+      shouldFinalize({ ...base, silentForMs: CFG.silenceMs - 1, sinceLastSegmentMs: 9999 }, CFG)
+    ).toBe(false)
   })
 
   it('does not commit until the backend segment has settled', () => {
@@ -145,7 +146,12 @@ describe('shouldFinalize', () => {
   it('commits once silent and settled, past the trailing grace', () => {
     expect(
       shouldFinalize(
-        { ...base, elapsedMs: CFG.trailingGraceMs, silentForMs: CFG.silenceMs, sinceLastSegmentMs: CFG.settleMs },
+        {
+          ...base,
+          elapsedMs: CFG.trailingGraceMs,
+          silentForMs: CFG.silenceMs,
+          sinceLastSegmentMs: CFG.settleMs
+        },
         CFG
       )
     ).toBe(true)
@@ -174,5 +180,118 @@ describe('shouldFinalize', () => {
         CFG
       )
     ).toBe(false)
+  })
+})
+
+describe('createReleaseWatchdog', () => {
+  const WATCHDOG_MS = 900
+  const HARD_CAP_MS = 30_000
+
+  // Deterministic injected clock + timers so the whole release policy runs without
+  // real time, jsdom, or React. Mirrors setTimeout/clearTimeout closely enough to
+  // exercise the rearm-on-repeat and hard-cap paths.
+  function harness() {
+    let clock = 0
+    let nextId = 1
+    let released = 0
+    const timers = new Map<number, { fireAt: number; fn: () => void }>()
+    const wd = createReleaseWatchdog({
+      watchdogMs: WATCHDOG_MS,
+      hardCapMs: HARD_CAP_MS,
+      setTimer: (fn, ms) => {
+        const id = nextId++
+        timers.set(id, { fireAt: clock + ms, fn })
+        return id as unknown as ReturnType<typeof setTimeout>
+      },
+      clearTimer: (t) => {
+        timers.delete(t as unknown as number)
+      },
+      onRelease: () => {
+        released++
+      }
+    })
+    const advance = (ms: number): void => {
+      const target = clock + ms
+      for (;;) {
+        let due: { id: number; fireAt: number; fn: () => void } | undefined
+        for (const [id, t] of timers) {
+          if (
+            t.fireAt <= target &&
+            (!due || t.fireAt < due.fireAt || (t.fireAt === due.fireAt && id < due.id))
+          ) {
+            due = { id, fireAt: t.fireAt, fn: t.fn }
+          }
+        }
+        if (!due) break
+        clock = due.fireAt
+        timers.delete(due.id)
+        due.fn()
+      }
+      clock = target
+    }
+    return { wd, advance, released: () => released }
+  }
+
+  it('recovers when the terminating keyup is lost (repeats seen, then go quiet)', () => {
+    const h = harness()
+    h.wd.begin()
+    // Key is held: auto-repeats keep arriving well within the watchdog window.
+    for (let i = 0; i < 5; i++) {
+      h.wd.noteRepeat()
+      h.advance(400)
+    }
+    expect(h.released()).toBe(0) // still holding — must not fire
+    // Key released but the keyup was swallowed: repeats stop. After the watchdog
+    // window with no further repeat, the hold is finalized as released.
+    h.advance(WATCHDOG_MS)
+    expect(h.released()).toBe(1)
+    // ...and only once.
+    h.advance(HARD_CAP_MS)
+    expect(h.released()).toBe(1)
+  })
+
+  it('does not false-fire while the key is genuinely held (repeats keep arriving)', () => {
+    const h = harness()
+    h.wd.begin()
+    // Sustained hold that stays under the hard cap: ~16s of repeats, each re-arming
+    // the watchdog before its window elapses. The watchdog must never fire here.
+    for (let i = 0; i < 20; i++) {
+      h.wd.noteRepeat()
+      h.advance(WATCHDOG_MS - 100)
+    }
+    expect(h.released()).toBe(0)
+  })
+
+  it('never arms the watchdog without a repeat (key-repeat disabled): no early cut', () => {
+    const h = harness()
+    h.wd.begin()
+    // No noteRepeat ever. The watchdog stays disarmed; only the hard cap can end it.
+    h.advance(WATCHDOG_MS * 5)
+    expect(h.released()).toBe(0)
+  })
+
+  it('hard-caps a recording that never gets a keyup or a repeat', () => {
+    const h = harness()
+    h.wd.begin()
+    h.advance(HARD_CAP_MS - 1)
+    expect(h.released()).toBe(0)
+    h.advance(1)
+    expect(h.released()).toBe(1)
+  })
+
+  it('stop() disarms both timers and does not itself signal release', () => {
+    const h = harness()
+    h.wd.begin()
+    h.wd.noteRepeat()
+    h.wd.stop() // e.g. a normal keyup already handled the finish
+    h.advance(HARD_CAP_MS * 2)
+    expect(h.released()).toBe(0)
+  })
+
+  it('ignores repeats before begin()', () => {
+    const h = harness()
+    h.wd.noteRepeat()
+    h.advance(HARD_CAP_MS * 2)
+    expect(h.released()).toBe(0)
   })
 })

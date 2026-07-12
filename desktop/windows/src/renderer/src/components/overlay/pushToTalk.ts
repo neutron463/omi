@@ -10,6 +10,118 @@ import type { TranscriptLine } from '../../../../shared/types'
  */
 export const HOLD_THRESHOLD_MS = 350
 
+/**
+ * Release watchdog. While recording, the physically-held Space key emits OS
+ * auto-repeat `keydown`s (~every 30–500ms) to the focused overlay. Those repeats
+ * are delivered reliably even when the terminating `keyup` is NOT — the summon
+ * chord (e.g. Shift+Space) can let Windows consume the Space keyup when Space is
+ * lifted while the modifier is still held, which otherwise strands the recording
+ * on the visualizer forever. So we treat "auto-repeat stopped" as the release: if
+ * no Space keydown arrives for this long AFTER we've seen at least one repeat, the
+ * key was released and we finalize as if it had been. Set comfortably above the
+ * slowest Windows repeat interval (~500ms) so a still-held key never trips it.
+ */
+export const RELEASE_WATCHDOG_MS = 900
+
+/**
+ * Hard cap on a live recording, independent of any key/focus signal. Backstop for
+ * the rare case where the keyup is lost AND no auto-repeat was ever observed (key
+ * repeat disabled), so the watchdog never armed. Far above any realistic
+ * hold-to-talk so it never truncates legitimate speech; it only exists so the
+ * "Listening…" visualizer can never be stuck indefinitely.
+ */
+export const RECORDING_HARD_CAP_MS = 30_000
+
+/** Injectable timer so the watchdog is deterministic under node Vitest. */
+export type WatchdogDeps = {
+  /** How long the held key's auto-repeat may go quiet before we call it released. */
+  watchdogMs: number
+  /** Absolute cap on a live recording, whatever the key/focus signals do. */
+  hardCapMs: number
+  setTimer: (fn: () => void, ms: number) => ReturnType<typeof setTimeout>
+  clearTimer: (t: ReturnType<typeof setTimeout>) => void
+  /** Invoked once when the recording is judged released (repeats stopped or cap hit). */
+  onRelease: () => void
+}
+
+export type ReleaseWatchdog = {
+  /** A recording started: arm the hard cap. */
+  begin: () => void
+  /** A Space auto-repeat keydown arrived — the key is still physically held. */
+  noteRepeat: () => void
+  /** The recording ended (keyup, release, cancel, unmount): disarm everything. */
+  stop: () => void
+}
+
+/**
+ * Guards against a push-to-talk recording that never ends because its terminating
+ * Space keyup was swallowed by the global summon chord (release Space while the
+ * modifier is still held → Windows eats the keyup, so the overlay's keyup listener
+ * never fires and the "Listening…" visualizer sticks forever).
+ *
+ * Instead of trusting that single keyup edge, we watch the held key's OS auto-repeat
+ * keydowns — which ARE delivered reliably to the focused overlay — via noteRepeat(),
+ * which re-arms a `watchdogMs` debounce timer. When the repeats stop (key released)
+ * the timer fires once and we finalize as if the keyup had arrived. A keyboard with
+ * key-repeat disabled simply never calls noteRepeat(), so the debounce timer is never
+ * armed and cannot false-cut a genuinely-held key; the `hardCapMs` backstop covers
+ * that residual "no keyup and no repeats" case. Pure/injectable so the whole release
+ * policy is unit-tested apart from React + DOM plumbing.
+ */
+export function createReleaseWatchdog(deps: WatchdogDeps): ReleaseWatchdog {
+  let active = false
+  let watchdogTimer: ReturnType<typeof setTimeout> | null = null
+  let capTimer: ReturnType<typeof setTimeout> | null = null
+
+  const clearWatchdog = (): void => {
+    if (watchdogTimer !== null) {
+      deps.clearTimer(watchdogTimer)
+      watchdogTimer = null
+    }
+  }
+  const clearCap = (): void => {
+    if (capTimer !== null) {
+      deps.clearTimer(capTimer)
+      capTimer = null
+    }
+  }
+
+  const stop = (): void => {
+    active = false
+    clearWatchdog()
+    clearCap()
+  }
+
+  const release = (): void => {
+    if (!active) return
+    stop()
+    deps.onRelease()
+  }
+
+  return {
+    begin: () => {
+      active = true
+      // Self-contained: clear any stale timers so a fresh recording never inherits
+      // a prior session's armed watchdog/cap (callers also stop() first today).
+      clearWatchdog()
+      clearCap()
+      capTimer = deps.setTimer(release, deps.hardCapMs)
+    },
+    noteRepeat: () => {
+      if (!active) return
+      // Re-arm the debounce: while repeats keep arriving the key is still held; once
+      // they stop for the full window the timer fires once → released. (Only ever
+      // armed here, so a keyboard that never repeats can't trip it.)
+      clearWatchdog()
+      watchdogTimer = deps.setTimer(() => {
+        watchdogTimer = null
+        release()
+      }, deps.watchdogMs)
+    },
+    stop
+  }
+}
+
 /** True when a press lasted long enough to count as a hold (vs a quick tap). */
 export function isHold(downAt: number, upAt: number, thresholdMs = HOLD_THRESHOLD_MS): boolean {
   return upAt - downAt >= thresholdMs
