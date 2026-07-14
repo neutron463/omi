@@ -50,6 +50,7 @@ docs/*
 !docs/bar-gotchas.md
 !docs/multi-worktree-dev.md
 !docs/mac-parity-audit
+!docs/mac-ui-port
 skills-lock.json
 
 # Visual brainstorming companion
