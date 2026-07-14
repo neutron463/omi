@@ -1,5 +1,11 @@
 # 06 — Settings & Onboarding (macOS reference spec)
 
+> **⚠ Product rulings (2026-07-14, Chris) — these override any contrary guidance below:**
+> 1. **Purple ports as-is.** Mac's purple (`#8B5CF6` accents, `#7A4DF2` Home glow, purple user bubbles, etc.) is copied faithfully to Windows. Ignore any instruction below to neutralize/substitute it. The INV-UI-1 invariant + guard test get updated in the first purple-introducing PR (owned by the UI Foundation track).
+> 2. **Same as Mac, not ahead.** Where this spec rates a Windows surface "ahead" of Mac, the Mac v0.12.72 design still wins for anything user-visible in the main app — exceptions require a decision gate in PARALLEL-PLAN.md, not a judgment call here.
+> 3. **The floating bar/orb overlay is exempt** — it keeps its current Windows design; Mac's bar is a functional reference only.
+> 4. Authoritative plan: `../mac-parity-audit/PARALLEL-PLAN.md`.
+
 **Reference:** Omi macOS desktop app at tag `v0.12.72+12072-macos` (commit `50d264c94`, 2026-07-12), read-only worktree `.worktrees/mac-ref/desktop/macos`. All Swift paths below are relative to `desktop/macos/`.
 **Scope:** Settings navigation + every settings pane, first-run onboarding flow, sign-in, permission-state UI, update UI. Excludes the notch/floating bar itself (only its *settings* pane is covered).
 
