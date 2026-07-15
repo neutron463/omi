@@ -46,7 +46,10 @@ export function ContinuousSessionHost(): null {
     })
   }, [])
 
-  const shouldRun = signedIn && (enabled || liveViews > 0)
+  // The continuity gauntlet must never open a real /v4/listen session. Guard at
+  // the capture owner itself so a reused profile with stale recording prefs
+  // cannot start the mic in the interval before gauntlet auth seeding reloads it.
+  const shouldRun = !window.omi.gauntlet && signedIn && (enabled || liveViews > 0)
   useEffect(() => {
     if (!shouldRun) return
     const session = startLiveMicSession()

@@ -100,3 +100,36 @@ Screen-session (mic + system audio) recordings sync to the Omi cloud via
 retry, duplicate-safe). Design, outbox semantics, and the live E2E harness
 (`pnpm test:e2e:conv-sync`) are documented in
 [docs/conversation-sync.md](docs/conversation-sync.md).
+
+## Agent continuity gauntlet
+
+The Windows port of the macOS agent gauntlet validates that typed chat,
+post-STT push-to-talk text, and background agents share the same chat engine.
+The hermetic wiring check is safe to run without starting Omi:
+
+```powershell
+pnpm test:agent-gauntlet:self-check
+```
+
+For a live run, start an isolated dev worktree with `OMI_E2E=1` and
+`OMI_GAUNTLET=1`, clone auth and onboarding safely with
+`pnpm seed:auth -- --gauntlet` (it forces continuous recording and retention
+off), get its CDP port from `pnpm dev:instance`, then run the current default
+`legacy_sse` continuity check:
+
+```powershell
+pnpm test:agent-gauntlet -- --cdp-port 9255 --suite continuity --allow-legacy
+```
+
+The runner refuses the canonical primary CDP port `9222`, a busy chat, or active
+agent work. For the full core suite, first switch the isolated profile to
+`pi_mono`, connect OpenClaw or Hermes, and add `--agent-provider openclaw` (or
+`hermes`).
+
+Live evidence is written under `.harness/agent-continuity-gauntlet/`. A
+Mac-equivalent kernel proof requires `chatEngine=pi_mono`; Windows currently
+defaults to `legacy_sse`, where `--allow-legacy` proves only shared UI history.
+The PTT step injects deterministic text after STT through the production
+bar-to-main IPC path because Windows does not yet have a forced-transcript
+realtime-hub action. Owner-swap, resilience-race,
+QueryTracer, and runtime-SQLite evidence probes also remain Mac-only.

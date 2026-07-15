@@ -124,6 +124,7 @@ const omi: OmiBridgeApi = {
   },
   allowVirtualMic: process.env.OMI_ALLOW_VIRTUAL_MIC === '1',
   e2e: process.env.OMI_E2E === '1',
+  gauntlet: process.env.OMI_GAUNTLET === '1',
   // Offline fake-auth for the shell E2E (survives production builds). Gated on a
   // dedicated flag the app never sets itself, so it can never activate in normal
   // use — and separate from OMI_E2E so the bar/meeting/lifecycle specs (which set

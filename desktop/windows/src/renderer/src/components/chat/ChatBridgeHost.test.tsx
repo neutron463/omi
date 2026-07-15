@@ -50,6 +50,7 @@ beforeEach(() => {
     reset: vi.fn()
   }
   ;(window as unknown as { omi: unknown }).omi = {
+    e2e: true,
     onBarChatSend: (cb: (p: { text: string; fromVoice: boolean }) => void) => {
       barSendCb = cb
       return () => {}
@@ -65,11 +66,69 @@ beforeEach(() => {
     publishChatState: (s: BarChatState) => published.push(s)
   }
 })
-afterEach(() => cleanup())
+afterEach(() => {
+  cleanup()
+  delete (
+    globalThis as unknown as {
+      __omiAgentGauntlet?: unknown
+    }
+  ).__omiAgentGauntlet
+})
 
 const settle = (): Promise<void> => act(async () => await new Promise((r) => setTimeout(r, 70)))
 
 describe('ChatBridgeHost', () => {
+  it('gates the gauntlet hook to E2E builds and removes it on unmount', () => {
+    ;(window.omi as typeof window.omi & { e2e: boolean }).e2e = false
+    const disabled = render(<ChatBridgeHost />)
+    expect(
+      (globalThis as unknown as { __omiAgentGauntlet?: unknown }).__omiAgentGauntlet
+    ).toBeUndefined()
+    disabled.unmount()
+    ;(window.omi as typeof window.omi & { e2e: boolean }).e2e = true
+    const enabled = render(<ChatBridgeHost />)
+    expect(
+      (globalThis as unknown as { __omiAgentGauntlet?: unknown }).__omiAgentGauntlet
+    ).toBeDefined()
+    enabled.unmount()
+    expect(
+      (globalThis as unknown as { __omiAgentGauntlet?: unknown }).__omiAgentGauntlet
+    ).toBeUndefined()
+  })
+
+  it('exposes a test-only continuity hook over the same chat engine', async () => {
+    chat = {
+      ...chat,
+      history: [{ id: 'u1', role: 'user', content: 'existing turn' }]
+    }
+    const { rerender } = render(<ChatBridgeHost />)
+
+    const hook = (
+      globalThis as unknown as {
+        __omiAgentGauntlet?: {
+          snapshot: () => BarChatState
+          sendTyped: (text: string) => Promise<void>
+          reset: () => void
+        }
+      }
+    ).__omiAgentGauntlet
+
+    expect(hook?.snapshot()).toMatchObject({
+      messages: [{ id: 'u1', role: 'user', content: 'existing turn' }],
+      sending: false,
+      status: 'idle'
+    })
+
+    await hook?.sendTyped('typed marker')
+    expect(sendSpy).toHaveBeenCalledWith('typed marker', { fromVoice: false })
+
+    const latestReset = vi.fn()
+    chat = { ...chat, reset: latestReset }
+    rerender(<ChatBridgeHost />)
+    hook?.reset()
+    expect(latestReset).toHaveBeenCalledOnce()
+  })
+
   it('drives the ONE chat.send() when the bar sends — threading fromVoice', async () => {
     render(<ChatBridgeHost />)
     barSendCb?.({ text: 'what is next', fromVoice: true })

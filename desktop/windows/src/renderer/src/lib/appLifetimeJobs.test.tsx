@@ -32,6 +32,7 @@ function Shell(): React.JSX.Element {
 beforeEach(() => {
   vi.useFakeTimers()
   vi.clearAllMocks()
+  ;(window as unknown as { omi: { gauntlet: boolean } }).omi = { gauntlet: false }
 })
 afterEach(() => {
   vi.useRealTimers()
@@ -39,6 +40,16 @@ afterEach(() => {
 })
 
 describe('useAppLifetimeJobs — the shell owns the background engines', () => {
+  it('starts only the safe chat-auth bootstrap in gauntlet mode', () => {
+    ;(window as unknown as { omi: { gauntlet: boolean } }).omi.gauntlet = true
+    render(<Shell />)
+    act(() => vi.advanceTimersByTime(5000))
+    expect(maybeStartInsightEngine).toHaveBeenCalledTimes(1)
+    expect(maybeStartScreenSynthesis).not.toHaveBeenCalled()
+    expect(maybeStartRetentionSweep).not.toHaveBeenCalled()
+    expect(maybeBuildLocalGraph).not.toHaveBeenCalled()
+  })
+
   it('starts screen synthesis, the insight engine, and the retention sweep on mount', () => {
     render(<Shell />)
     expect(maybeStartScreenSynthesis).toHaveBeenCalledTimes(1)
@@ -70,7 +81,10 @@ describe('useAppLifetimeJobs — the shell owns the background engines', () => {
   it('is actually CALLED by the app shell — not just callable', () => {
     // vitest runs from the package root (desktop/windows).
     const app = readFileSync(join(process.cwd(), 'src/renderer/src/App.tsx'), 'utf8')
-    const shell = app.slice(app.indexOf('function AppShellInner'), app.indexOf('function AppShell('))
+    const shell = app.slice(
+      app.indexOf('function AppShellInner'),
+      app.indexOf('function AppShell(')
+    )
     expect(shell).toContain('useAppLifetimeJobs()')
   })
 })

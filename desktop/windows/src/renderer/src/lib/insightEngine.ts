@@ -22,6 +22,10 @@ let started = false
 export function maybeStartInsightEngine(): void {
   if (started) return
   started = true
+  if (window.omi.gauntlet) {
+    startPiMonoAuthHost()
+    return
+  }
   startAiProfileHost()
   startRewindEmbedHost()
   startPiMonoAuthHost()

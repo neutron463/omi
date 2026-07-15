@@ -20,6 +20,12 @@ const GRAPH_BUILD_DELAY_MS = 1800
 
 export function useAppLifetimeJobs(): void {
   useEffect(() => {
+    if (window.omi.gauntlet) {
+      // Keep only the pi-mono auth relay needed by kernel chat; the insight
+      // bootstrap owns that gauntlet-specific selection.
+      maybeStartInsightEngine()
+      return
+    }
     const t = setTimeout(() => void maybeBuildLocalGraph(), GRAPH_BUILD_DELAY_MS)
     maybeStartScreenSynthesis()
     maybeStartInsightEngine()

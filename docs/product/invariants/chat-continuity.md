@@ -32,6 +32,10 @@ is one shared chat mind across surfaces — not per-surface product histories.
   a second authoritative transcript store and per-surface history APIs
 - Continuity gauntlet (manual / harness): typed → PTT → typed follow-up → spawn →
   status (`desktop/macos/scripts/agent-continuity-gauntlet.sh` when present)
+- Windows continuity gauntlet: typed → synthetic post-STT PTT text → blind typed
+  recall → spawn → status
+  (`desktop/windows/scripts/agent-continuity-gauntlet.mjs`; its manifest must keep
+  the real-PTT limitation explicit until a forced-transcript hub hook exists)
 
 ## Path globs
 
@@ -45,6 +49,10 @@ is one shared chat mind across surfaces — not per-surface product histories.
 - `desktop/macos/Desktop/Sources/MainWindow/Components/TaskChatPanel.swift`
 - `desktop/macos/Desktop/Sources/Rewind/Core/TaskChatMessageStorage.swift`
 - `desktop/macos/Desktop/Sources/ProactiveAssistants/Assistants/TaskAgent/**`
+- `desktop/windows/src/main/agentKernel/**`
+- `desktop/windows/src/main/ipc/mainChat.ts`
+- `desktop/windows/src/renderer/src/components/chat/**`
+- `desktop/windows/src/renderer/src/hooks/useChat.ts`
 
 ## PR rule
 

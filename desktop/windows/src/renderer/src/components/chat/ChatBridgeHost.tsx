@@ -47,6 +47,9 @@ export function ChatBridgeHost(): null {
   const sendRef = useRef(chat.send)
   // eslint-disable-next-line react-hooks/refs -- latest-ref: the once-registered bar listener must call the newest send
   sendRef.current = chat.send
+  const resetRef = useRef(chat.reset)
+  // eslint-disable-next-line react-hooks/refs -- the stable E2E hook must reset the latest chat generation
+  resetRef.current = chat.reset
   const sendChainRef = useRef<Promise<void>>(Promise.resolve())
   // Latest-ref mirrors of the engine's busy signals so the stable bar-send
   // listener can tell when the shared engine is busy — and whether it's busy on a
@@ -89,6 +92,27 @@ export function ChatBridgeHost(): null {
         }
       }, 50)
     })
+  }, [])
+
+  // Windows continuity-gauntlet seam. The macOS harness drives an in-process
+  // automation bridge; Windows already exposes renderer E2E hooks through the
+  // preload's OMI_E2E flag, so keep this adapter test-only and point it at the
+  // exact same useChat instance that Home and the floating bar share.
+  useEffect(() => {
+    if (window.omi?.e2e !== true) return
+    const hook = {
+      snapshot: (): BarChatState => stateRef.current,
+      sendTyped: (text: string): Promise<void> => sendRef.current(text, { fromVoice: false }),
+      reset: (): void => resetRef.current(),
+      engine: (): Promise<'legacy_sse' | 'pi_mono'> => window.omi.chatGetEngine()
+    }
+    const target = globalThis as unknown as {
+      __omiAgentGauntlet?: typeof hook
+    }
+    target.__omiAgentGauntlet = hook
+    return () => {
+      if (target.__omiAgentGauntlet === hook) delete target.__omiAgentGauntlet
+    }
   }, [])
 
   useEffect(() => {

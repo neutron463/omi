@@ -73,3 +73,6 @@ resources/win-audio-helper/*.pdb
 # Orb harness artifacts (contact sheets, pixel dumps) — generated
 .orb-out/
 orb-harness/dist/
+
+# Agent continuity gauntlet evidence — generated
+.harness/

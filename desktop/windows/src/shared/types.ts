@@ -713,6 +713,9 @@ export type OmiBridgeApi = {
   /** True when OMI_E2E=1 — renderer-side test hooks (e.g. window.__omiVoice)
    *  attach only in harness runs, never in production. */
   e2e: boolean
+  /** True only for the isolated agent-continuity gauntlet. Suppresses unrelated
+   *  background mutation jobs while keeping chat and pi-mono auth available. */
+  gauntlet: boolean
   /** True when OMI_E2E_FAKE_AUTH=1 — the shell E2E injects an offline fake user
    *  so the authed `/*` shell mounts on the real production build. A dedicated
    *  flag (never set by the app), so it can never activate in normal use. */

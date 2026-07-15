@@ -38,6 +38,8 @@
     "gen:app-icon": "node scripts/gen-app-icon.mjs",
     "test:e2e:ptt": "node scripts/run-live-e2e.mjs src/main/ipc/pttTranscribe.e2e.test.ts",
     "test:e2e:agent": "node scripts/run-agent-e2e.mjs src/main/codingAgent/acp.e2e.test.ts",
+    "test:agent-gauntlet": "node scripts/agent-continuity-gauntlet.mjs",
+    "test:agent-gauntlet:self-check": "vitest run scripts/agent-continuity-gauntlet.test.mjs src/renderer/src/components/chat/ChatBridgeHost.test.tsx src/renderer/src/hooks/useChat.pimono.test.tsx src/main/ipc/mainChat.test.ts src/main/agentKernel/controlTools.test.ts src/renderer/src/lib/appLifetimeJobs.test.tsx src/renderer/src/lib/insightEngine.test.ts src/renderer/src/capture/ContinuousSessionHost.test.tsx && node scripts/agent-continuity-gauntlet.mjs --self-check",
     "test:e2e:conv-sync": "node scripts/run-live-e2e.mjs src/renderer/src/lib/sync/convSync.e2e.test.ts",
     "test:e2e:voice-smoke": "node scripts/run-voice-smoke.mjs",
     "voice:loop-check": "node scripts/run-voice-loop-check.mjs",

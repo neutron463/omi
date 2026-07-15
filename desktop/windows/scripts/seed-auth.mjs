@@ -17,6 +17,8 @@
 //   node scripts/seed-auth.mjs --to fix-orb    # → the named instance's derived CDP port
 //   node scripts/seed-auth.mjs --from-port 9222 --to-port 9231
 //   node scripts/seed-auth.mjs --auth-only     # copy only firebase:* + prefs
+//   node scripts/seed-auth.mjs --firebase-only # copy sign-in, never device prefs
+//   node scripts/seed-auth.mjs --gauntlet      # auth + onboarding, recording safely off
 //   node scripts/seed-auth.mjs --dry-run       # show what WOULD be copied
 //
 // Both apps must already be running (`pnpm dev` in each checkout).
@@ -27,6 +29,7 @@ import {
   sanitizeInstanceName,
   resolveInstance
 } from './lib/dev-ports.mjs'
+import { prepareSeedEntries } from './lib/seed-auth-keys.mjs'
 
 function parseArgs(argv) {
   const opts = {
@@ -35,6 +38,8 @@ function parseArgs(argv) {
     from: null,
     to: null,
     authOnly: false,
+    firebaseOnly: false,
+    gauntlet: false,
     dryRun: false
   }
   for (let i = 0; i < argv.length; i++) {
@@ -44,6 +49,8 @@ function parseArgs(argv) {
     else if (a === '--from') opts.from = argv[++i]
     else if (a === '--to') opts.to = argv[++i]
     else if (a === '--auth-only') opts.authOnly = true
+    else if (a === '--firebase-only') opts.firebaseOnly = true
+    else if (a === '--gauntlet') opts.gauntlet = true
     else if (a === '--dry-run') opts.dryRun = true
     else if (a === '--help' || a === '-h') opts.help = true
     else throw new Error(`unknown argument: ${a}`)
@@ -87,17 +94,18 @@ async function connectMainPage(port, role) {
   return { browser, page: main }
 }
 
-const AUTH_ONLY_MATCH = (k) => k.startsWith('firebase:') || k === 'omi-windows-prefs-v1'
-
 async function main() {
   const opts = parseArgs(process.argv.slice(2))
+  if ([opts.authOnly, opts.firebaseOnly, opts.gauntlet].filter(Boolean).length > 1) {
+    throw new Error('--auth-only, --firebase-only, and --gauntlet are mutually exclusive')
+  }
   if (opts.help) {
     console.log(
       [
         'Seed a signed-in session from one running dev instance into another.',
         '',
         '  node scripts/seed-auth.mjs [--from <name>|--from-port <n>] [--to <name>|--to-port <n>]',
-        '                             [--auth-only] [--dry-run]',
+        '                             [--auth-only|--firebase-only|--gauntlet] [--dry-run]',
         '',
         'Defaults: source = primary (CDP 9222), target = this worktree (derived from cwd).'
       ].join('\n')
@@ -129,8 +137,8 @@ async function main() {
     await src.browser.close()
   }
 
-  let keys = Object.keys(data)
-  if (opts.authOnly) keys = keys.filter(AUTH_ONLY_MATCH)
+  const entries = prepareSeedEntries(data, opts)
+  const keys = entries.map(([key]) => key)
   const hasFirebaseUser = keys.some((k) => k.startsWith('firebase:authUser:'))
   if (keys.length === 0) {
     throw new Error('source localStorage is empty — is the source app signed in / onboarded?')
@@ -151,7 +159,6 @@ async function main() {
 
   const dst = await connectMainPage(toPort, 'target')
   try {
-    const entries = keys.map((k) => [k, data[k]])
     await dst.page.evaluate((pairs) => {
       for (const [k, v] of pairs) localStorage.setItem(k, v)
     }, entries)
