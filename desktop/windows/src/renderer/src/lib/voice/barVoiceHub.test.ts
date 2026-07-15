@@ -50,6 +50,7 @@ class FakeHub implements BarHubControllerLike {
   cancelled: VoiceTurnID[] = []
   handedOff: VoiceTurnID[] = []
   terminated: VoiceTurnID[] = []
+  tornDown = 0
 
   constructor(events: HubControllerEvents) {
     this.events = events
@@ -84,6 +85,9 @@ class FakeHub implements BarHubControllerLike {
   }
   voiceTurnDidTerminate(turnID: VoiceTurnID): void {
     this.terminated.push(turnID)
+  }
+  teardownSession(): void {
+    this.tornDown += 1
   }
 }
 
@@ -122,6 +126,25 @@ describe('resampleFrom16k', () => {
   it('upsamples length ~1.5x to 24 kHz', () => {
     const pcm = new Int16Array(100)
     expect(resampleFrom16k(pcm, 24000).length).toBe(150)
+  })
+})
+
+describe('barVoiceHub teardown (kill-switch off / sign-out / unmount)', () => {
+  it('drops the warm socket but stays reusable (a later warm reconnects)', () => {
+    const { bridge, hub } = makeBridge(null, { pttHubEnabled: true })
+    bridge.warm()
+    expect(hub.ensureWarmCalls).toBe(1)
+    bridge.teardown()
+    expect(hub.tornDown).toBe(1)
+    bridge.warm() // reusable after teardown
+    expect(hub.ensureWarmCalls).toBe(2)
+  })
+
+  it('dispose also drops the socket (no leak past bar unmount)', () => {
+    const { bridge, hub } = makeBridge(null, { pttHubEnabled: true })
+    bridge.warm()
+    bridge.dispose()
+    expect(hub.tornDown).toBe(1)
   })
 })
 

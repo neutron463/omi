@@ -80,11 +80,15 @@ export type BarHubControllerLike = {
   cancelTurn: (turnID: VoiceTurnID) => void
   handoffWarmWaitToCascade: (turnID: VoiceTurnID) => void
   voiceTurnDidTerminate: (turnID: VoiceTurnID) => void
+  teardownSession: () => void
 }
 
 export type BarVoiceHub = VoiceHubBridge & {
   /** Open (or reuse) the warm socket. Caller guarantees a signed-in user. */
   warm: () => void
+  /** Drop the warm socket (kill-switch turned off, or sign-out) WITHOUT destroying
+   *  the bridge — a later `warm()` opens a fresh session. Idempotent. */
+  teardown: () => void
   /** Latest reducer projection (drives the bar orb while the hub turn runs). */
   readonly projection: VoiceTurnUIProjection
   /** True while the hub reply is thinking/waiting/speaking — the bar keeps the
@@ -375,6 +379,12 @@ export function createBarVoiceHub(deps: BarVoiceHubDeps = {}): BarVoiceHub {
     warm: () => {
       void Promise.resolve(hub.ensureWarm()).catch(() => {})
     },
+    teardown: () => {
+      // Abandon any live turn first so its reducer state is released, then drop the
+      // socket. Keeps the bridge reusable (a later warm() reconnects).
+      if (activeTurnID) cancel()
+      hub.teardownSession()
+    },
     beginTurn,
     appendPcm,
     commit,
@@ -393,6 +403,8 @@ export function createBarVoiceHub(deps: BarVoiceHubDeps = {}): BarVoiceHub {
     dispose: () => {
       listeners.clear()
       coordinator.reset()
+      // Don't leak the warm socket past bar unmount — drop it too.
+      hub.teardownSession()
     }
   }
 }

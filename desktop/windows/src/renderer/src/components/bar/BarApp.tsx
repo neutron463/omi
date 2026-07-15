@@ -81,6 +81,9 @@ export function BarApp(): React.JSX.Element {
   const [typedVoice, setTypedVoice] = useState(
     () => !!getPreferences().floatingBarTypedVoiceEnabled
   )
+  // Warm-hub PTT kill-switch (same pref selectPttRoute reads). Reactive so a
+  // runtime toggle warms/tears down the hub socket with no restart.
+  const [hubEnabled, setHubEnabled] = useState(() => getPreferences().pttHubEnabled === true)
   const [chat, setChat] = useState<BarChatState>(EMPTY_CHAT)
   // Connected coding agents (shared fetch with Settings → Agents).
   const { agents } = useCodingAgents()
@@ -112,6 +115,7 @@ export function BarApp(): React.JSX.Element {
 
   useEffect(() => onPreferencesChange((p) => setContinuous(!!p.continuousRecording)), [])
   useEffect(() => onPreferencesChange((p) => setTypedVoice(!!p.floatingBarTypedVoiceEnabled)), [])
+  useEffect(() => onPreferencesChange((p) => setHubEnabled(p.pttHubEnabled === true)), [])
   useEffect(() => {
     let active = true
     void auth.authStateReady().then(() => {
@@ -248,12 +252,16 @@ export function BarApp(): React.JSX.Element {
   useEffect(() => {
     if (ready) window.omiBar.ready()
   }, [ready])
-  // Warm the hub once for a signed-in user (Mac's warm-at-setup). Gated on ready +
-  // user so no mint fires before Firebase restores async; ensureWarm tolerates a
-  // 401 regardless (it never invalidates the session).
+  // Warm the hub for a signed-in user WHEN the kill-switch is on (Mac's
+  // warm-at-setup). Gated on ready + user + pttHubEnabled so NO token mint or
+  // provider WebSocket opens while the flag is off — and toggling the pref off at
+  // runtime tears the warm socket down (on → warms it), no restart. The mint is
+  // __sessionPreserving, so a dead-session 401 during eager warm refreshes+retries
+  // once but never kicks the user to Login.
   useEffect(() => {
-    if (ready && user) voiceHub.warm()
-  }, [ready, user, voiceHub])
+    if (ready && user && hubEnabled) voiceHub.warm()
+    else voiceHub.teardown()
+  }, [ready, user, hubEnabled, voiceHub])
 
   // --- main → renderer lifecycle ---------------------------------------------
   const senderRef = useRef(sender)
