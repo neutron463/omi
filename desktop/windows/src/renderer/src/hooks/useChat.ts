@@ -73,6 +73,11 @@ export type UseChat = {
   send: (text: string, opts?: { fromVoice?: boolean }) => Promise<void>
   /** Clear the thread to a fresh conversation. */
   reset: () => void
+  /** Record a COMPLETED native voice turn (user transcript + assistant reply) into
+   *  the thread — the realtime hub already produced and spoke the reply on the bar,
+   *  so this appends both messages and persists them WITHOUT calling the LLM or TTS
+   *  (INV-CHAT-1: the spoken turn lands in the one shared timeline). */
+  recordVoiceTurn: (userText: string, assistantText: string) => void
 }
 
 /**
@@ -759,5 +764,21 @@ export function useChat(): UseChat {
     }
   }
 
-  return { history, sending, speaking, agentActive, send, reset }
+  // Record a COMPLETED native realtime-hub voice turn (user transcript + assistant
+  // reply) into the ONE thread (INV-CHAT-1). The hub already produced AND spoke the
+  // reply on the bar, so this appends both messages and persists them WITHOUT
+  // calling the LLM or TTS — mirroring the automation-plan branch, which posts a
+  // non-streamed outcome turn the same way.
+  const recordVoiceTurn = (userText: string, assistantText: string): void => {
+    const user = userText.trim()
+    const assistant = assistantText.trim()
+    if (!user || !assistant) return
+    const userMsg: ChatMsg = { id: crypto.randomUUID(), role: 'user', content: user }
+    const assistantMsg: ChatMsg = { id: crypto.randomUUID(), role: 'assistant', content: assistant }
+    const base = history
+    setHistory((h) => [...h, userMsg, assistantMsg])
+    void persistChat([...base, userMsg, assistantMsg])
+  }
+
+  return { history, sending, speaking, agentActive, send, reset, recordVoiceTurn }
 }

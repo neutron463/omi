@@ -58,7 +58,7 @@ import {
 } from './watchdog'
 import { makeKeySampler, makePrimaryMouseButtonSampler } from './keyState'
 import { getAppSettings, setAppSettings } from '../appSettings'
-import type { BarUsageLimitPayload } from '../../shared/types'
+import type { BarUsageLimitPayload, VoiceTurnRecordPayload } from '../../shared/types'
 
 export type BarMode = 'peek' | 'expanded' | 'ptt'
 export type BarReveal = 'summon' | 'ptt'
@@ -905,6 +905,12 @@ export function registerBarIpc(sendToMain: (channel: string, ...args: unknown[])
   // from the floating bar) and speaks the line back for a voice turn.
   ipcMain.on('bar:usageLimit', (_e, payload: BarUsageLimitPayload) => {
     sendToMain('chat:barUsageLimit', payload)
+  })
+  // A completed native realtime-hub voice turn — its audio already played on the
+  // bar; hop the TEXT to the main window so ChatBridgeHost records it into the ONE
+  // chat engine (INV-CHAT-1), no LLM re-run, no re-speak.
+  ipcMain.on('bar:recordVoiceTurn', (_e, payload: VoiceTurnRecordPayload) => {
+    sendToMain('chat:barRecordVoiceTurn', payload)
   })
   // The bar (re)requests the current chat state — e.g. on first mount / each
   // reveal — so it renders the ongoing thread even if it missed prior broadcasts.

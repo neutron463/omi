@@ -654,3 +654,32 @@ describe('useChat — chat attachments (file_ids)', () => {
     expect(JSON.parse(bodies[0])).toEqual({ text: 'later', file_ids: ['srv-a.txt'] })
   })
 })
+
+describe('useChat — recordVoiceTurn (native hub turn → one timeline, no LLM/TTS)', () => {
+  it('appends the user + assistant messages and persists them, with no fetch and no spoken reply', async () => {
+    const { result } = renderHook(() => useChat())
+    act(() => result.current.recordVoiceTurn('what time is it', "it's noon"))
+    await act(async () => {
+      await flush()
+    })
+    expect(result.current.history.map((m) => [m.role, m.content])).toEqual([
+      ['user', 'what time is it'],
+      ['assistant', "it's noon"]
+    ])
+    // Persisted to SQLite as one completed turn…
+    expect(persisted.at(-1)).toEqual([
+      expect.objectContaining({ role: 'user', content: 'what time is it' }),
+      expect.objectContaining({ role: 'assistant', content: "it's noon" })
+    ])
+    // …with NO LLM round-trip and NO TTS — the hub already produced + spoke it.
+    expect(streams).toHaveLength(0)
+    expect(speakSpy).not.toHaveBeenCalled()
+  })
+
+  it('ignores an empty turn (missing user or assistant text)', () => {
+    const { result } = renderHook(() => useChat())
+    act(() => result.current.recordVoiceTurn('', 'orphan'))
+    act(() => result.current.recordVoiceTurn('orphan', '   '))
+    expect(result.current.history).toHaveLength(0)
+  })
+})

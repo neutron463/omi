@@ -11,6 +11,7 @@ import type {
   BarShowPayload,
   BarChatState,
   BarUsageLimitPayload,
+  VoiceTurnRecordPayload,
   LocalConversation,
   ConversationFolder,
   ConversationSyncPatch,
@@ -382,6 +383,12 @@ const omi: OmiBridgeApi = {
     ipcRenderer.on('chat:barRequestState', listener)
     return () => ipcRenderer.removeListener('chat:barRequestState', listener)
   },
+  onBarRecordVoiceTurn: (cb: (payload: VoiceTurnRecordPayload) => void) => {
+    const listener = (_e: Electron.IpcRendererEvent, payload: VoiceTurnRecordPayload): void =>
+      cb(payload)
+    ipcRenderer.on('chat:barRecordVoiceTurn', listener)
+    return () => ipcRenderer.removeListener('chat:barRecordVoiceTurn', listener)
+  },
   publishChatState: (state: BarChatState) => ipcRenderer.send('chat:publishState', state),
   // --- Tray + lifecycle (Phase 1) ---
   trayReportState: (state) => ipcRenderer.send('tray:state', state),
@@ -492,6 +499,8 @@ const omiBar: OmiBarApi = {
     ipcRenderer.send('bar:sendChat', { text, fromVoice }),
   interruptTts: () => ipcRenderer.send('bar:interruptTts'),
   notifyUsageLimit: (payload: BarUsageLimitPayload) => ipcRenderer.send('bar:usageLimit', payload),
+  recordVoiceTurn: (payload: VoiceTurnRecordPayload) =>
+    ipcRenderer.send('bar:recordVoiceTurn', payload),
   requestChatState: () => ipcRenderer.send('bar:requestChatState'),
   onChatState: (cb: (state: BarChatState) => void) => {
     const listener = (_e: Electron.IpcRendererEvent, state: BarChatState): void => cb(state)

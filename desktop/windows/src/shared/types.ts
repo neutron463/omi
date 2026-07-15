@@ -435,6 +435,10 @@ export type BarShowPayload = { mode: BarMode; reveal: BarReveal; token: number }
  *  re-showing the popup. */
 export type BarUsageLimitPayload = { message: string; spoken: boolean; popup?: boolean }
 
+/** A completed native realtime-hub voice turn, bridged bar→main so its text lands
+ *  in the ONE chat engine (INV-CHAT-1). Audio already played on the bar. */
+export type VoiceTurnRecordPayload = { userText: string; assistantText: string }
+
 /** Renderer bridge for the top-edge bar window (see main/bar/window.ts). */
 export type OmiBarApi = {
   /** The bar renderer has mounted + measured — flush any deferred first show. */
@@ -467,6 +471,11 @@ export type OmiBarApi = {
    *  turn). Mac parity: the modal always shows on the main window, even when the
    *  block came from the floating bar. */
   notifyUsageLimit: (payload: BarUsageLimitPayload) => void
+  /** A completed native hub voice turn — project its text (user transcript +
+   *  assistant reply) into the MAIN window's single chat engine (INV-CHAT-1). The
+   *  audio already played bar-locally and the hub already spoke, so ChatBridgeHost
+   *  records the turn WITHOUT re-running the LLM or re-speaking it. */
+  recordVoiceTurn: (payload: VoiceTurnRecordPayload) => void
   /** Ask the main window to (re)broadcast the current chat state — called on
    *  mount / each reveal so the bar shows the ongoing thread. */
   requestChatState: () => void
@@ -959,6 +968,9 @@ export type OmiBridgeApi = {
    *  shared UsageLimitPopup here (and speaks the line for a voice turn).
    *  Main-window renderer only. */
   onBarUsageLimit: (cb: (payload: BarUsageLimitPayload) => void) => () => void
+  /** A completed native hub voice turn — ChatBridgeHost records it into the ONE
+   *  chat engine (no LLM, no TTS). Main-window renderer only. */
+  onBarRecordVoiceTurn: (cb: (payload: VoiceTurnRecordPayload) => void) => () => void
   /** The bar (re)requested current chat state — ChatBridgeHost publishes now. */
   onBarRequestChatState: (cb: () => void) => () => void
   /** Broadcast the projected chat state to the bar (history + streaming + status). */

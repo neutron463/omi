@@ -47,6 +47,9 @@ export function ChatBridgeHost(): null {
   const sendRef = useRef(chat.send)
   // eslint-disable-next-line react-hooks/refs -- latest-ref: the once-registered bar listener must call the newest send
   sendRef.current = chat.send
+  const recordVoiceTurnRef = useRef(chat.recordVoiceTurn)
+  // eslint-disable-next-line react-hooks/refs -- latest-ref: the once-registered bar listener must call the newest recorder (fresh history)
+  recordVoiceTurnRef.current = chat.recordVoiceTurn
   const sendChainRef = useRef<Promise<void>>(Promise.resolve())
   // Latest-ref mirrors of the engine's busy signals so the stable bar-send
   // listener can tell when the shared engine is busy — and whether it's busy on a
@@ -110,6 +113,15 @@ export function ChatBridgeHost(): null {
   // speaks through, so this is the surface that can actually interrupt it.
   useEffect(() => {
     return window.omi?.onBarChatInterrupt?.(() => interruptCurrentResponse())
+  }, [])
+
+  // A completed native realtime-hub voice turn — record its text (user transcript +
+  // assistant reply) into the ONE chat engine (INV-CHAT-1). The hub already spoke
+  // the reply on the bar, so there is no LLM call and no TTS here.
+  useEffect(() => {
+    return window.omi?.onBarRecordVoiceTurn?.(({ userText, assistantText }) =>
+      recordVoiceTurnRef.current(userText, assistantText)
+    )
   }, [])
 
   // A bar send was refused by the chat usage limit. Both surfaces the user sees
