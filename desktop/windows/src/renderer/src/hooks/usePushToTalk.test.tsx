@@ -518,3 +518,86 @@ describe('silent-mic escalation (A7b)', () => {
     expect(h.trackEvent).not.toHaveBeenCalled()
   })
 })
+
+// The warm-hub bridge is INERT unless supplied AND it claims the hold. When it
+// declines (or is absent — every other test in this file), the cascade path is
+// byte-for-byte unchanged. When it claims a hold, mic PCM is teed to the hub, the
+// opportunistic stream is not opened, and the batch text send is suppressed.
+describe('warm-hub route (voiceHub bridge)', () => {
+  const fakeHub = (outcome: 'hub' | 'fallback', claims = true) => ({
+    beginTurn: vi.fn(() => claims),
+    appendPcm: vi.fn(),
+    commit: vi.fn(() => Promise.resolve(outcome)),
+    cancel: vi.fn()
+  })
+
+  it('claims the hold: tees PCM, opens NO stream, commits to the hub, suppresses batch + text', async () => {
+    const voiceHub = fakeHub('hub')
+    const { onCommit } = setup({ voiceHub })
+    pressSpace()
+    await advance(HOLD_THRESHOLD_MS)
+    expect(voiceHub.beginTurn).toHaveBeenCalledTimes(1)
+    // The mic still opens (shared capture; buffer retained for a warm-race
+    // fallback), but the opportunistic backend stream is never opened.
+    expect(h.startPttCapture).toHaveBeenCalledOnce()
+    expect(h.startPttStream).not.toHaveBeenCalled()
+    // A mic chunk goes to the hub, not to a stream queue.
+    act(() => h.state.captureOpts[0].onChunk?.(new Int16Array([1, 2])))
+    expect(voiceHub.appendPcm).toHaveBeenCalledTimes(1)
+
+    releaseSpace()
+    await advance(0) // drain → startBatch → voiceHub.commit()
+    await advance(0) // commit → 'hub' → BATCH_OK ''
+    expect(voiceHub.commit).toHaveBeenCalledTimes(1)
+    expect(h.batchTranscribe).not.toHaveBeenCalled() // hub took it — no batch POST
+    expect(onCommit).not.toHaveBeenCalled() // native reply; no chat text send
+  })
+
+  it('warm-race handoff: commit → fallback runs the batch on the retained buffer and sends the text', async () => {
+    const voiceHub = fakeHub('fallback')
+    const { onCommit } = setup({ voiceHub })
+    pressSpace()
+    await advance(HOLD_THRESHOLD_MS)
+    releaseSpace()
+    await advance(0) // drain → commit()
+    await advance(0) // commit → 'fallback' → runBatch
+    expect(h.batchTranscribe).toHaveBeenCalledOnce()
+    await act(async () => {
+      h.state.batchCalls[0].resolve('hello from the cascade')
+      await vi.advanceTimersByTimeAsync(0)
+    })
+    expect(onCommit).toHaveBeenCalledWith('hello from the cascade')
+  })
+
+  it('declines the hold: the cascade path is byte-identical (stream opens, batch runs, text sends)', async () => {
+    const voiceHub = fakeHub('hub', /* claims */ false)
+    const { onCommit } = setup({ voiceHub })
+    pressSpace()
+    await advance(HOLD_THRESHOLD_MS)
+    expect(h.startPttStream).toHaveBeenCalledOnce() // opportunistic stream, as always
+    act(() => h.state.captureOpts[0].onChunk?.(new Int16Array([1, 2])))
+    expect(voiceHub.appendPcm).not.toHaveBeenCalled() // not the hub's turn
+    releaseSpace()
+    await advance(0)
+    expect(voiceHub.commit).not.toHaveBeenCalled()
+    expect(h.batchTranscribe).toHaveBeenCalledOnce()
+    await act(async () => {
+      h.state.batchCalls[0].resolve('typed cascade path')
+      await vi.advanceTimersByTimeAsync(0)
+    })
+    expect(onCommit).toHaveBeenCalledWith('typed cascade path')
+  })
+
+  it('a too-short hub hold is discarded: the hub turn is cancelled (socket kept), nothing commits', async () => {
+    h.state.drainBuffer = SHORT_200MS
+    const voiceHub = fakeHub('hub')
+    const { onCommit } = setup({ voiceHub })
+    pressSpace()
+    await advance(HOLD_THRESHOLD_MS)
+    releaseSpace()
+    await advance(0) // drain → too-short gate → idle (no batch)
+    expect(voiceHub.commit).not.toHaveBeenCalled()
+    expect(voiceHub.cancel).toHaveBeenCalledTimes(1)
+    expect(onCommit).not.toHaveBeenCalled()
+  })
+})

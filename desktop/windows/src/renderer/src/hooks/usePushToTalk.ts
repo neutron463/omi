@@ -30,6 +30,7 @@ import {
   RECORDING_TOO_LONG_MESSAGE
 } from '../lib/ptt/constants'
 import { PCM_PENDING_MAX_BYTES, type WaveformSource } from '../../../shared/types'
+import type { VoiceHubBridge } from '../lib/voice/barVoiceHub'
 
 // Hold-Space push-to-talk, buffer-first (macOS architecture): one mic capture per
 // hold feeds a local PCM buffer + the waveform + an opportunistic live stream. On
@@ -68,6 +69,12 @@ type Options = {
   checkUsageLimit?: () => { blocked: boolean; message?: string }
   /** Raise the shared usage-limit popup for a hold that checkUsageLimit vetoed. */
   onUsageLimitBlocked?: (message: string) => void
+  /** Warm-hub bridge. When present AND it claims a hold (pttHubEnabled on + hub
+   *  warm/available), mic PCM is teed to the hub, the opportunistic backend stream
+   *  is not opened, and the reply is the hub's native audio (no batch text send).
+   *  Absent, or when it declines the hold, the cascade path below runs
+   *  byte-for-byte as it does today. */
+  voiceHub?: VoiceHubBridge
 }
 
 export type PushToTalk = {
@@ -132,6 +139,12 @@ type Job = {
   /** Time between the physical key-down and the hold threshold firing — the
    *  warm mic backfills this much pre-roll so the threshold costs no speech. */
   backfillMs: number
+  /** The warm hub claimed this hold (route hub/hubWarmWait): tee PCM to it, skip
+   *  the opportunistic stream, and commit to the hub at release. */
+  hubOwns: boolean
+  /** The hub took the committed turn (its native reply is playing), so the idle
+   *  teardown must NOT also cancel it. */
+  hubCommitted: boolean
 }
 
 function isSpace(e: { key: string; code: string }): boolean {
@@ -237,6 +250,14 @@ export function usePushToTalk(opts: Options): PushToTalk {
         case 'startCapture': {
           job.capturePromise = startPttCapture({
             onChunk: (pcm) => {
+              // Hub route: tee the frame to the warm socket (native STT/response).
+              // The opportunistic backend stream is never opened for a hub turn, so
+              // there is no stream queue to feed. The retained buffer (in the
+              // capture window) is unaffected, so a warm-race fallback still batches.
+              if (job.hubOwns) {
+                optsRef.current.voiceHub?.appendPcm(pcm)
+                return
+              }
               // Until the stream session exists, queue (bounded) so the stream
               // lane hears the backfill + early speech too — otherwise the fast
               // short-circuit commit would be missing the opening words.
@@ -281,6 +302,8 @@ export function usePushToTalk(opts: Options): PushToTalk {
           break
         }
         case 'startStream': {
+          // Hub route owns STT — never open the opportunistic backend stream.
+          if (job.hubOwns) break
           startPttStream({
             onConnected: () => dispatch(job, { type: 'STREAM_CONNECTED' }),
             onFinal: (text) => dispatch(job, { type: 'STREAM_FINAL', text }),
@@ -340,20 +363,24 @@ export function usePushToTalk(opts: Options): PushToTalk {
           break
         }
         case 'startBatch': {
-          const abort = new AbortController()
-          job.abort = abort
-          void (async () => {
-            try {
-              const transcript = await batchTranscribe(
-                job.buffer ?? new Int16Array(0),
-                abort.signal
-              )
-              dispatch(job, { type: 'BATCH_OK', transcript })
-            } catch (err) {
-              if (abort.signal.aborted) return // cancelled — the job is already idle
-              dispatch(job, { type: 'BATCH_FAIL', message: batchErrorMessage(err) })
-            }
-          })()
+          if (job.hubOwns) {
+            // Hub route: ask the warm hub to take the released turn. 'hub' → the
+            // native reply is already playing, so commit an EMPTY transcript (the
+            // `commit` effect's `if (eff.text)` guard suppresses the chat text
+            // send — the hub speaks, and its text is projected to MAIN separately).
+            // 'fallback' → the hub lost the 1 s warm race; run today's batch on the
+            // retained 16 kHz buffer, byte-for-byte the shipped path.
+            void optsRef.current.voiceHub!.commit().then((outcome) => {
+              if (outcome === 'hub') {
+                job.hubCommitted = true
+                dispatch(job, { type: 'BATCH_OK', transcript: '' })
+              } else {
+                runBatch(job)
+              }
+            })
+            break
+          }
+          runBatch(job)
           break
         }
         case 'abortBatch': {
@@ -403,6 +430,10 @@ export function usePushToTalk(opts: Options): PushToTalk {
     }
 
     if (job.state.phase === 'idle' && prevPhase !== 'idle') {
+      // A hub turn that reached idle WITHOUT committing (silent/too-short/cancel/
+      // watchdog discard) must be abandoned so the warm socket is freed for the
+      // next press — the hub keeps the socket, only the per-turn state is dropped.
+      if (job.hubOwns && !job.hubCommitted) optsRef.current.voiceHub?.cancel()
       clearJobTimers(job)
       liveJobsRef.current.delete(job)
       // Release the big audio references immediately — the finished job object
@@ -414,6 +445,23 @@ export function usePushToTalk(opts: Options): PushToTalk {
       job.pendingStreamBytes = 0
     }
     syncUi(job)
+  }
+
+  // Batch-transcribe the retained buffer and drive the result back into the
+  // machine — the shipped cascade commit, factored out so the hub warm-race
+  // fallback (voiceHub.commit() → 'fallback') runs the byte-identical path.
+  const runBatch = (job: Job): void => {
+    const abort = new AbortController()
+    job.abort = abort
+    void (async () => {
+      try {
+        const transcript = await batchTranscribe(job.buffer ?? new Int16Array(0), abort.signal)
+        dispatch(job, { type: 'BATCH_OK', transcript })
+      } catch (err) {
+        if (abort.signal.aborted) return // cancelled — the job is already idle
+        dispatch(job, { type: 'BATCH_FAIL', message: batchErrorMessage(err) })
+      }
+    })()
   }
 
   const startHold = (): void => {
@@ -453,10 +501,18 @@ export function usePushToTalk(opts: Options): PushToTalk {
       abort: null,
       deadlineTimer: null,
       watchdogTimer: null,
-      backfillMs: keyDownAtRef.current > 0 ? Date.now() - keyDownAtRef.current : 0
+      backfillMs: keyDownAtRef.current > 0 ? Date.now() - keyDownAtRef.current : 0,
+      hubOwns: false,
+      hubCommitted: false
     }
     jobRef.current = job
     liveJobsRef.current.add(job)
+    // Route the hold: the warm hub claims it (native audio in + native reply out)
+    // when the kill-switch is on and the socket is warm/available; otherwise this
+    // stays false and the cascade path below runs exactly as it does today.
+    // Claimed AFTER onHoldStart's barge-in so a new hold supersedes a still-playing
+    // hub reply (the bridge interrupts the prior turn internally).
+    job.hubOwns = !!optsRef.current.voiceHub && optsRef.current.voiceHub.beginTurn()
     setError(null)
     setHint(null)
     // Take back the space(s) auto-repeat typed while holding, then clear the box
