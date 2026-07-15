@@ -124,5 +124,11 @@ Once the secrets exist, the next release is signed automatically — no workflow
   Main* → **Run workflow**. `release_mode: force_release` releases even with no
   new changes; `next_version` pins an explicit version.
 - **Build the installer locally** (unsigned): from `desktop/windows/`,
-  `pnpm build:win`. Output lands in `dist/` (`Omi for Windows-Setup-<version>.exe`,
+  `pnpm build:win`. Output lands in `dist/` (`Omi-for-Windows-Setup-<version>.exe`,
   its `.blockmap`, and `latest.yml`).
+- **If the build job fails after the tag was created:** re-run the **failed jobs
+  only** (Actions → the run → "Re-run failed jobs") — that reuses the plan job's
+  tag/version outputs and re-publishes to the existing tag. Do *not* "Re-run all
+  jobs": the plan job would see no new change since the just-created tag and skip,
+  stranding the tag with no assets. Alternatively, `workflow_dispatch` with
+  `release_mode: force_release` cuts a fresh version.

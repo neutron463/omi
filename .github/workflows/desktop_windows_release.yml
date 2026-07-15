@@ -217,12 +217,19 @@ jobs:
         id: signing
         shell: bash
         env:
+          # All-or-nothing: every secret the signed build path needs (auth +
+          # profile) must be present, or a partial set would run the signed path
+          # with an empty value and die at signing instead of falling back unsigned.
+          AZURE_TENANT_ID: ${{ secrets.AZURE_TENANT_ID }}
           AZURE_CLIENT_ID: ${{ secrets.AZURE_CLIENT_ID }}
+          AZURE_CLIENT_SECRET: ${{ secrets.AZURE_CLIENT_SECRET }}
+          AZURE_PUBLISHER_NAME: ${{ secrets.AZURE_PUBLISHER_NAME }}
           AZURE_ENDPOINT: ${{ secrets.AZURE_CODE_SIGNING_ENDPOINT }}
           AZURE_ACCOUNT: ${{ secrets.AZURE_CODE_SIGNING_ACCOUNT }}
           AZURE_PROFILE: ${{ secrets.AZURE_CERT_PROFILE_NAME }}
         run: |
-          if [ -n "${AZURE_CLIENT_ID}" ] && [ -n "${AZURE_ENDPOINT}" ] && [ -n "${AZURE_ACCOUNT}" ] && [ -n "${AZURE_PROFILE}" ]; then
+          if [ -n "${AZURE_TENANT_ID}" ] && [ -n "${AZURE_CLIENT_ID}" ] && [ -n "${AZURE_CLIENT_SECRET}" ] && \
+             [ -n "${AZURE_PUBLISHER_NAME}" ] && [ -n "${AZURE_ENDPOINT}" ] && [ -n "${AZURE_ACCOUNT}" ] && [ -n "${AZURE_PROFILE}" ]; then
             echo "signed=true" >> "$GITHUB_OUTPUT"
           else
             echo "signed=false" >> "$GITHUB_OUTPUT"
