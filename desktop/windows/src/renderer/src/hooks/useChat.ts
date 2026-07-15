@@ -773,11 +773,17 @@ export function useChat(): UseChat {
     const user = userText.trim()
     const assistant = assistantText.trim()
     if (!user || !assistant) return
+    // Same generation guard sibling persistChat callers use: if the thread is
+    // reset/dismissed while this record's persist is in flight, drop the write so
+    // the completed voice turn can't be misattributed to the new conversation
+    // (per-launch mode replaces rather than merges).
+    const myGen = genRef.current
+    const isCurrent = (): boolean => genRef.current === myGen
     const userMsg: ChatMsg = { id: crypto.randomUUID(), role: 'user', content: user }
     const assistantMsg: ChatMsg = { id: crypto.randomUUID(), role: 'assistant', content: assistant }
     const base = history
     setHistory((h) => [...h, userMsg, assistantMsg])
-    void persistChat([...base, userMsg, assistantMsg])
+    void persistChat([...base, userMsg, assistantMsg], isCurrent)
   }
 
   return { history, sending, speaking, agentActive, send, reset, recordVoiceTurn }
