@@ -145,7 +145,12 @@ export function HomeHub(): React.JSX.Element {
           the floor to compensate for space being stolen from the ceiling. */}
       <div
         className="pointer-events-none absolute inset-x-0 top-0 z-10 mx-auto flex justify-end"
-        style={{ maxWidth: STAGE_MAX, paddingLeft: SIDE_INSET, paddingRight: SIDE_INSET, paddingTop: 26 }}
+        style={{
+          maxWidth: STAGE_MAX,
+          paddingLeft: SIDE_INSET,
+          paddingRight: SIDE_INSET,
+          paddingTop: 26
+        }}
       >
         <div className="pointer-events-auto">
           <HubHeader />
@@ -161,7 +166,6 @@ export function HomeHub(): React.JSX.Element {
           paddingBottom: STAGE_BOTTOM_INSET
         }}
       >
-
         {/* The stage's height budget. The cluster (ribbon + ask bar + suggestions) is
             shrink-0 and the lead-in spacer is the ONLY shrinkable item, so a shorter
             window eats the empty space above the wordmark and never the controls —
@@ -306,4 +310,3 @@ function StagePanel({ children }: { children: React.ReactNode }): React.JSX.Elem
     </div>
   )
 }
-
