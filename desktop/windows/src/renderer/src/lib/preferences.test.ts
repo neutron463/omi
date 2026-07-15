@@ -31,3 +31,22 @@ describe('floatingBarTypedVoiceEnabled — speak typed bar replies toggle', () =
     expect(getPreferences().floatingBarTypedVoiceEnabled).toBe(true)
   })
 })
+
+// The warm realtime hub was flipped ON by default after live hub-turn verification
+// (2026-07-15). selectPttRoute reads getPreferences().pttHubEnabled; ON-by-default
+// means a fresh install routes PTT to the hub, and an explicit opt-out still wins.
+describe('pttHubEnabled — warm-hub PTT default', () => {
+  beforeEach(() => {
+    localStorage.clear()
+    setPreferences({}) // reload the module cache from the cleared store → defaults
+  })
+
+  it('defaults ON — a fresh install routes PTT to the warm hub', () => {
+    expect(getPreferences().pttHubEnabled).toBe(true)
+  })
+
+  it('an explicit opt-out (false) overrides the ON default', () => {
+    setPreferences({ pttHubEnabled: false })
+    expect(getPreferences().pttHubEnabled).toBe(false)
+  })
+})
