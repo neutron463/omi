@@ -105,6 +105,19 @@ describe('useChatSessions — mutations', () => {
     expect(result.current.sessions[0].title).toBe('Renamed')
   })
 
+  it('surfaces an error (never an unhandled rejection) when a mutation fails', async () => {
+    const { client, fns } = makeClient([session({ id: '1', starred: false })])
+    fns.updateSession.mockRejectedValueOnce({ response: { data: { detail: 'nope' } } })
+    const { result } = render(client)
+    await waitFor(() => expect(result.current.loading).toBe(false))
+
+    await act(async () => {
+      await result.current.toggleStar('1') // must resolve, not reject
+    })
+    expect(result.current.error).toBe('nope')
+    expect(result.current.sessions[0].starred).toBe(false) // no optimistic flip on failure
+  })
+
   it('toggleStar flips the flag locally when the starred filter is off', async () => {
     const { client, fns } = makeClient([session({ id: '1', starred: false })])
     const { result } = render(client)

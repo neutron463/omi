@@ -231,6 +231,9 @@ export function ChatSessionsSidebar({ state }: { state: UseChatSessions }): Reac
     try {
       await removeSession(pendingDelete.id)
       setPendingDelete(null)
+    } catch {
+      // removeSession already surfaced the error; keep the modal open so the
+      // user can retry or cancel (and never leak an unhandled rejection).
     } finally {
       setDeleting(false)
     }

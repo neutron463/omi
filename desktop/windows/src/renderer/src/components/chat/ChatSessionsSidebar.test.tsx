@@ -151,4 +151,19 @@ describe('ChatSessionsSidebar — list & interactions', () => {
     fireEvent.click(confirm)
     await waitFor(() => expect(removeSession).toHaveBeenCalledWith('1'))
   })
+
+  it('keeps the delete modal open when the delete fails (no unhandled rejection)', async () => {
+    const removeSession = vi.fn(async () => {
+      throw new Error('boom')
+    })
+    render(<ChatSessionsSidebar state={makeState({ sessions: two, removeSession })} />)
+    fireEvent.click(screen.getAllByRole('button', { name: 'Delete' })[0])
+    const confirm = screen
+      .getAllByRole('button', { name: 'Delete' })
+      .find((b) => b.textContent === 'Delete')!
+    fireEvent.click(confirm)
+    await waitFor(() => expect(removeSession).toHaveBeenCalled())
+    // The confirm dialog is still present — the failure was swallowed gracefully.
+    expect(screen.getByText('Delete Chat?')).toBeTruthy()
+  })
 })

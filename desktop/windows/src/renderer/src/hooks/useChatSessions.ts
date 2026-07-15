@@ -136,14 +136,22 @@ export function useChatSessions(options?: { client?: SessionsClientLike }): UseC
     }
   }, [client])
 
+  // Mutations catch and surface failures via `error` rather than rejecting — the
+  // UI fires them as `void toggleStar(...)`, so an unhandled rejection is the
+  // real failure mode to guard against. `removeSession` re-throws after setting
+  // error so its awaiting caller (the delete-confirm modal) can keep itself open.
   const renameSession = useCallback(
     async (id: string, title: string) => {
       const trimmed = title.trim()
       const target = sessions.find((s) => s.id === id)
       // Silent no-op on empty or unchanged title (Mac guard).
       if (!trimmed || (target && trimmed === target.title)) return
-      const updated = await client.updateSession(id, { title: trimmed })
-      setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, title: updated.title } : s)))
+      try {
+        const updated = await client.updateSession(id, { title: trimmed })
+        setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, title: updated.title } : s)))
+      } catch (e) {
+        setError(errorMessage(e))
+      }
     },
     [client, sessions]
   )
@@ -153,7 +161,12 @@ export function useChatSessions(options?: { client?: SessionsClientLike }): UseC
       const target = sessions.find((s) => s.id === id)
       if (!target) return
       const next = !target.starred
-      await client.updateSession(id, { starred: next })
+      try {
+        await client.updateSession(id, { starred: next })
+      } catch (e) {
+        setError(errorMessage(e))
+        return
+      }
       if (showStarredOnly) {
         // The starred filter is a server query; re-run it so an unstarred row
         // drops out of (or a starred row is reflected in) the filtered view.
@@ -167,7 +180,12 @@ export function useChatSessions(options?: { client?: SessionsClientLike }): UseC
 
   const removeSession = useCallback(
     async (id: string) => {
-      await client.deleteSession(id)
+      try {
+        await client.deleteSession(id)
+      } catch (e) {
+        setError(errorMessage(e))
+        throw e
+      }
       setSessions((prev) => prev.filter((s) => s.id !== id))
       // Deleting the open session returns to the default shared thread.
       setCurrentSessionId((cur) => (cur === id ? null : cur))
