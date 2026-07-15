@@ -23,6 +23,7 @@ import { useCodingAgents } from '../../hooks/useCodingAgents'
 import { Orb } from '../orb/Orb'
 import { BarChatSurface } from './BarChatSurface'
 import { createBarSender } from './barSend'
+import { createBarVoiceHub } from '../../lib/voice/barVoiceHub'
 import {
   deriveOrbState,
   isBarBusy,
@@ -35,6 +36,7 @@ import type {
   BarMode,
   BarShowPayload,
   BarChatState,
+  BarChatStatus,
   CodingAgentId,
   WaveformSource
 } from '../../../../shared/types'
@@ -128,6 +130,30 @@ export function BarApp(): React.JSX.Element {
   // snapshot, refreshed on mount + each reveal, so the send path stays off the
   // network.
   const [sender] = useState(() => createBarSender())
+  // The warm realtime-voice hub (dark until pttHubEnabled). Audio (mic + spoken
+  // reply) is bar-local like Mac; the turn's TEXT is projected to the ONE main
+  // chat engine (INV-CHAT-1) via the bar→main bridge so a spoken turn lands in the
+  // same timeline Home and typed chat share.
+  const [voiceHub] = useState(() =>
+    createBarVoiceHub({
+      onRecordTurn: (userText, assistantText) =>
+        window.omiBar.recordVoiceTurn({ userText, assistantText })
+    })
+  )
+  // Hub reply state → the bar orb + pill (the hub bypasses the chat engine, so
+  // chat.status never reflects it): 'sending' while thinking, 'speaking' while the
+  // native reply plays.
+  const [hubStatus, setHubStatus] = useState<BarChatStatus | null>(null)
+  useEffect(
+    () =>
+      voiceHub.subscribe((p) =>
+        setHubStatus(
+          p.isResponseActive ? 'speaking' : p.isResponseWaiting || p.isThinking ? 'sending' : null
+        )
+      ),
+    [voiceHub]
+  )
+  useEffect(() => () => voiceHub.dispose(), [voiceHub])
   const [limitNotice, setLimitNotice] = useState<string | null>(null)
   // Resolves to the blocked-limit notice (null when the send went out) so the
   // typed surface can put the user's words back in the input instead of eating
@@ -179,7 +205,11 @@ export function BarApp(): React.JSX.Element {
     // Fires on every completed hold capture (drives the onboarding voice step).
     onCaptureEnd: () => window.omiOverlay.notifyVoiceCaptured(),
     restoreDraft: (snapshot) => setDraft(snapshot),
-    getDraft: () => draftRef.current
+    getDraft: () => draftRef.current,
+    // Warm-hub route: when it claims the hold, this hold's audio goes native (in +
+    // out) and the reply plays here in the bar; absent/declined → the cascade path
+    // below is byte-for-byte unchanged.
+    voiceHub
   })
   // A capture that FAILS (mic unavailable → the machine cancels, so no
   // captureEnded ever fires; or a batch/pipeline error) leaves the bar silent —
@@ -218,6 +248,12 @@ export function BarApp(): React.JSX.Element {
   useEffect(() => {
     if (ready) window.omiBar.ready()
   }, [ready])
+  // Warm the hub once for a signed-in user (Mac's warm-at-setup). Gated on ready +
+  // user so no mint fires before Firebase restores async; ensureWarm tolerates a
+  // 401 regardless (it never invalidates the session).
+  useEffect(() => {
+    if (ready && user) voiceHub.warm()
+  }, [ready, user, voiceHub])
 
   // --- main → renderer lifecycle ---------------------------------------------
   const senderRef = useRef(sender)
@@ -297,7 +333,7 @@ export function BarApp(): React.JSX.Element {
   const busy = isBarBusy({
     recording: ptt.recording,
     transcribing: ptt.transcribing,
-    status: chat.status
+    status: hubStatus ?? chat.status
   })
   const retractTimer = useRef<ReturnType<typeof setTimeout> | null>(null)
   useEffect(() => {
@@ -345,7 +381,9 @@ export function BarApp(): React.JSX.Element {
   const orb = deriveOrbState({
     recording: ptt.recording,
     transcribing: ptt.transcribing,
-    status: chat.status,
+    // The hub bypasses the chat engine, so surface its reply state here (Mac shows
+    // the same responding/speaking orb for a native turn).
+    status: hubStatus ?? chat.status,
     continuousListening,
     agentsActive
   })
