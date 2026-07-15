@@ -63,19 +63,26 @@ win:
   target:
     - target: nsis
       arch: [x64]
-  # --- CODE SIGNING (unsigned today → Windows SmartScreen warns "unknown publisher") ---
-  # Signing requires a certificate that must be procured separately; until one is
-  # wired in, leave this commented so unsigned builds still succeed. Recommended:
-  # Azure Trusted Signing (no hardware token, CI-friendly). Once you have an
-  # account, uncomment and set the values (store secrets in CI, never here):
+  # --- CODE SIGNING (Azure Trusted Signing, env-activated) ---
+  # Signing is NOT configured statically here on purpose: an always-present
+  # azureSignOptions block would make every local `pnpm build:win` attempt to
+  # sign and fail when no Azure creds are around. Instead the release workflow
+  # (.github/workflows/desktop_windows_release.yml) injects the block ONLY when
+  # the Azure Trusted Signing secrets exist, via electron-builder `-c` overrides:
   #
-  # azureSignOptions:
-  #   publisherName: "Based Hardware"
-  #   endpoint: "https://<region>.codesigning.azure.net/"
-  #   certificateProfileName: "<profile>"
-  #   codeSigningAccountName: "<account>"
+  #   electron-builder --win --x64 \
+  #     -c.win.azureSignOptions.publisherName="$AZURE_PUBLISHER_NAME" \
+  #     -c.win.azureSignOptions.endpoint="$AZURE_CODE_SIGNING_ENDPOINT" \
+  #     -c.win.azureSignOptions.certificateProfileName="$AZURE_CERT_PROFILE_NAME" \
+  #     -c.win.azureSignOptions.codeSigningAccountName="$AZURE_CODE_SIGNING_ACCOUNT"
   #
-  # Traditional OV/EV cert alternative:
+  # Auth comes from AZURE_TENANT_ID / AZURE_CLIENT_ID / AZURE_CLIENT_SECRET in the
+  # env (electron-builder + @azure/identity read them). When the secrets are
+  # absent the workflow builds unsigned (SmartScreen warns "unknown publisher")
+  # and this file stays inert — no behavior change. Full setup + the exact GitHub
+  # secret names: desktop/windows/docs/release-pipeline.md.
+  #
+  # Traditional OV/EV cert alternative (also inject via the workflow, never here):
   # signtoolOptions:
   #   certificateSubjectName: "Based Hardware"   # EV cert in the machine store
   #   # or: certificateFile / certificatePassword via CSC_LINK / CSC_KEY_PASSWORD env
@@ -83,7 +90,11 @@ nsis:
   oneClick: false
   perMachine: false
   allowToChangeInstallationDirectory: true
-  artifactName: ${productName}-Setup-${version}.${ext}
+  # No spaces in the installer filename: electron-updater downloads by the exact
+  # `url` in latest.yml, and the release workflow uploads assets by their on-disk
+  # name via `gh`. A spaced name (from productName) sanitizes to a different url
+  # in latest.yml than the uploaded asset -> auto-update 404s. Keep them identical.
+  artifactName: Omi-for-Windows-Setup-${version}.${ext}
   shortcutName: ${productName}
   uninstallDisplayName: ${productName}
   createDesktopShortcut: always
@@ -111,10 +122,15 @@ npmRebuild: false
 # --- AUTO-UPDATE ---
 # electron-updater is wired in src/main/updater.ts (packaged builds only; silent
 # download + install-on-next-quit; NSIS differential updates stay default-on).
-# The production feed is the GitHub releases where the macOS beta channel lives.
-# Local testing uses dev-app-update.yml + OMI_UPDATER_DEV=1 (forceDevUpdateConfig)
-# instead of this feed. releaseType 'release' means only non-prerelease GitHub
-# releases are served as updates.
+# This is the UPDATE FEED only; the release workflow publishes with `gh` (not
+# electron-builder's uploader), so the owner/repo here must match where the
+# workflow lands releases — desktop_windows_release.yml publishes to the repo it
+# runs in (BasedHardware/omi in production), so they align.
+# releaseType 'release' means only non-prerelease GitHub releases are served as
+# updates: the workflow's betas are prereleases, so they are NOT auto-pushed to
+# installed apps (download manually), mirroring the macOS beta/stable split —
+# a stable-promotion step (flip prerelease -> false) is what makes a build
+# auto-update. Local testing uses dev-app-update.yml + OMI_UPDATER_DEV=1.
 publish:
   - provider: github
     owner: BasedHardware
