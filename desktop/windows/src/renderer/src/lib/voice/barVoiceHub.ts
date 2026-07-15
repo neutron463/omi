@@ -226,12 +226,13 @@ export function createBarVoiceHub(deps: BarVoiceHubDeps = {}): BarVoiceHub {
       settleIfTerminal(id)
     },
     onInputTranscript: (text, isFinal) => {
-      if (isFinal) transcriptText = text
+      // Accumulate deltas; a non-empty final replaces with the full string. An
+      // EMPTY final is just a completion marker (OpenAI emits one) — keep what we
+      // accumulated, or recordVoiceTurn's non-empty guard would drop the turn.
+      if (text) transcriptText = isFinal ? text : transcriptText + text
     },
     onAssistantText: (text, isFinal) => {
-      // Providers stream deltas as non-final and (usually) a final full string.
-      if (isFinal) assistantText = text
-      else assistantText += text
+      if (text) assistantText = isFinal ? text : assistantText + text
     },
     onSpeakingStart: () => {
       const id = activeTurnID
