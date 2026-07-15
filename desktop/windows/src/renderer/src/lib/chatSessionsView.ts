@@ -37,12 +37,7 @@ export interface SessionGroup {
   sessions: ChatSession[]
 }
 
-// Bucket labels (macOS-style relative grouping). Older sessions fall into a
-// "Month Year" bucket (current year) or "Year" bucket (prior years).
-const TODAY = 'Today'
-const YESTERDAY = 'Yesterday'
-const PREVIOUS_7 = 'Previous 7 Days'
-const PREVIOUS_30 = 'Previous 30 Days'
+const DAY_MS = 86_400_000
 
 function startOfLocalDay(ms: number): number {
   const d = new Date(ms)
@@ -50,59 +45,41 @@ function startOfLocalDay(ms: number): number {
   return d.getTime()
 }
 
-const MONTH_NAMES = [
-  'January',
-  'February',
-  'March',
-  'April',
-  'May',
-  'June',
-  'July',
-  'August',
-  'September',
-  'October',
-  'November',
-  'December'
-]
-
-function bucketLabel(sessionMs: number, now: number): string {
-  const todayStart = startOfLocalDay(now)
-  const dayMs = 86_400_000
-  const sessionDayStart = startOfLocalDay(sessionMs)
-  const daysAgo = Math.round((todayStart - sessionDayStart) / dayMs)
-
-  if (daysAgo <= 0) return TODAY
-  if (daysAgo === 1) return YESTERDAY
-  if (daysAgo <= 7) return PREVIOUS_7
-  if (daysAgo <= 30) return PREVIOUS_30
-
-  const d = new Date(sessionMs)
-  const nowYear = new Date(now).getFullYear()
-  if (d.getFullYear() === nowYear) return MONTH_NAMES[d.getMonth()]
-  return String(d.getFullYear())
-}
-
 /**
- * Group sessions into date buckets by `updatedAt`, preserving the input order
- * within each bucket (the server returns `updated_at DESC`, so newest-first is
- * kept). Buckets appear in first-seen order, which — given DESC input — is
- * already most-recent-first. `now` is injectable for deterministic tests.
+ * Group sessions into the four macOS buckets, VERBATIM from
+ * `ChatProvider.computeGroupedSessions()`: **Today** (same calendar day),
+ * **Yesterday** (previous calendar day), **This Week** (`updatedAt` newer than
+ * a rolling 7 days ago), then **Older**. Only non-empty buckets appear, always
+ * in that fixed order. Input order is preserved within a bucket (the server
+ * returns `updated_at DESC`, so newest-first is kept). `now` is injectable for
+ * deterministic tests.
  */
 export function groupSessionsByDate(
   sessions: ChatSession[],
   now: number = Date.now()
 ): SessionGroup[] {
-  const groups: SessionGroup[] = []
-  const byLabel = new Map<string, SessionGroup>()
+  const todayStart = startOfLocalDay(now)
+  const yesterdayStart = todayStart - DAY_MS
+  const weekAgo = now - 7 * DAY_MS
+
+  const today: ChatSession[] = []
+  const yesterday: ChatSession[] = []
+  const thisWeek: ChatSession[] = []
+  const older: ChatSession[] = []
+
   for (const s of sessions) {
-    const label = bucketLabel(toEpochMs(s.updatedAt), now)
-    let group = byLabel.get(label)
-    if (!group) {
-      group = { label, sessions: [] }
-      byLabel.set(label, group)
-      groups.push(group)
-    }
-    group.sessions.push(s)
+    const t = toEpochMs(s.updatedAt)
+    const dayStart = startOfLocalDay(t)
+    if (dayStart === todayStart) today.push(s)
+    else if (dayStart === yesterdayStart) yesterday.push(s)
+    else if (t > weekAgo) thisWeek.push(s)
+    else older.push(s)
   }
+
+  const groups: SessionGroup[] = []
+  if (today.length) groups.push({ label: 'Today', sessions: today })
+  if (yesterday.length) groups.push({ label: 'Yesterday', sessions: yesterday })
+  if (thisWeek.length) groups.push({ label: 'This Week', sessions: thisWeek })
+  if (older.length) groups.push({ label: 'Older', sessions: older })
   return groups
 }

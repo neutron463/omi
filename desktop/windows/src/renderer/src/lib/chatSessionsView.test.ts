@@ -59,26 +59,22 @@ describe('groupSessionsByDate', () => {
   const now = new Date(2026, 6, 14, 12, 0, 0).getTime()
   const at = (y: number, m: number, d: number, h = 9): string => new Date(y, m, d, h).toISOString()
 
-  it('buckets by relative day into Today / Yesterday / Previous 7 Days / Previous 30 Days', () => {
+  it('buckets into the four macOS groups: Today / Yesterday / This Week / Older', () => {
     const groups = groupSessionsByDate(
       [
         session({ id: 'today', updatedAt: at(2026, 6, 14) }),
         session({ id: 'yst', updatedAt: at(2026, 6, 13) }),
-        session({ id: 'wk', updatedAt: at(2026, 6, 10) }), // 4 days ago
-        session({ id: 'mo', updatedAt: at(2026, 6, 1) }) // 13 days ago
+        session({ id: 'wk', updatedAt: at(2026, 6, 10) }), // 4 days ago → This Week
+        session({ id: 'old', updatedAt: at(2026, 6, 1) }) // 13 days ago → Older
       ],
       now
     )
-    expect(groups.map((g) => g.label)).toEqual([
-      'Today',
-      'Yesterday',
-      'Previous 7 Days',
-      'Previous 30 Days'
-    ])
+    expect(groups.map((g) => g.label)).toEqual(['Today', 'Yesterday', 'This Week', 'Older'])
     expect(groups[0].sessions.map((s) => s.id)).toEqual(['today'])
+    expect(groups[3].sessions.map((s) => s.id)).toEqual(['old'])
   })
 
-  it('buckets older same-year sessions by month name, and prior years by year', () => {
+  it('puts everything older than 7 days into "Older" (no month/year buckets)', () => {
     const groups = groupSessionsByDate(
       [
         session({ id: 'may', updatedAt: at(2026, 4, 3) }), // May 2026
@@ -86,7 +82,16 @@ describe('groupSessionsByDate', () => {
       ],
       now
     )
-    expect(groups.map((g) => g.label)).toEqual(['May', '2025'])
+    expect(groups.map((g) => g.label)).toEqual(['Older'])
+    expect(groups[0].sessions.map((s) => s.id)).toEqual(['may', 'lastyear'])
+  })
+
+  it('treats the 7-day boundary as a rolling window (just inside → This Week)', () => {
+    const groups = groupSessionsByDate(
+      [session({ id: 'edge', updatedAt: new Date(now - 6.5 * 86_400_000).toISOString() })],
+      now
+    )
+    expect(groups.map((g) => g.label)).toEqual(['This Week'])
   })
 
   it('preserves input order within a bucket (server sends updated_at DESC)', () => {
