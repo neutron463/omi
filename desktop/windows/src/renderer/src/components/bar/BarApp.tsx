@@ -20,6 +20,7 @@ import { auth } from '../../lib/firebase'
 import { getPreferences, onPreferencesChange } from '../../lib/preferences'
 import { usePushToTalk } from '../../hooks/usePushToTalk'
 import { useCodingAgents } from '../../hooks/useCodingAgents'
+import { useHubWarmLifecycle } from '../../hooks/useHubWarmLifecycle'
 import { Orb } from '../orb/Orb'
 import { BarChatSurface } from './BarChatSurface'
 import { createBarSender } from './barSend'
@@ -253,15 +254,9 @@ export function BarApp(): React.JSX.Element {
     if (ready) window.omiBar.ready()
   }, [ready])
   // Warm the hub for a signed-in user WHEN the kill-switch is on (Mac's
-  // warm-at-setup). Gated on ready + user + pttHubEnabled so NO token mint or
-  // provider WebSocket opens while the flag is off — and toggling the pref off at
-  // runtime tears the warm socket down (on → warms it), no restart. The mint is
-  // __sessionPreserving, so a dead-session 401 during eager warm refreshes+retries
-  // once but never kicks the user to Login.
-  useEffect(() => {
-    if (ready && user && hubEnabled) voiceHub.warm()
-    else voiceHub.teardown()
-  }, [ready, user, hubEnabled, voiceHub])
+  // warm-at-setup). The opt-out contract (no mint/socket while off, teardown on
+  // toggle-off/sign-out) lives in useHubWarmLifecycle so it's unit-tested.
+  useHubWarmLifecycle(voiceHub, { ready, signedIn: !!user, hubEnabled })
 
   // --- main → renderer lifecycle ---------------------------------------------
   const senderRef = useRef(sender)
