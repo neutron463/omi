@@ -86,6 +86,13 @@ export type Preferences = {
   // Fall back to the original Home screen instead of the Hub. Undefined = off, so
   // the Hub is what a user sees by default; Settings → Appearance can switch back.
   useLegacyHomeDesign?: boolean
+  // Multi-session chat (macOS `multiChatEnabled` parity). When true, the chat
+  // sessions sidebar is surfaced and users can create desktop-local chat
+  // threads alongside the default shared thread. Undefined = OFF, so Windows
+  // behaves exactly like today (one continuous shared thread, no session concept
+  // surfaced) until a user opts in. The default un-sessioned thread ALWAYS stays
+  // the cross-platform continuity thread regardless of this flag.
+  multiChatEnabled?: boolean
   // Mute other apps' system audio while push-to-talk is capturing (macOS
   // SystemAudioMuteController parity — so a playing video doesn't bleed into the
   // mic and you can hear yourself think). Undefined = ON, the macOS-faithful
