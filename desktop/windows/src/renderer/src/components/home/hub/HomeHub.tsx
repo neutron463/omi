@@ -1,6 +1,7 @@
 import { useCallback, useEffect, useRef, useState } from 'react'
 import { useAppState } from '../../../state/appState'
 import { cn } from '../../../lib/utils'
+import { getPreferences, onPreferencesChange } from '../../../lib/preferences'
 import { HomeCanvasBackground } from '../HomeCanvasBackground'
 import { HubHeader } from './HubHeader'
 import { HubAskBar } from './HubAskBar'
@@ -8,6 +9,7 @@ import { HubSuggestions } from './HubSuggestions'
 import { HubStatRibbon } from './HubStatRibbon'
 import { HubChatPanel } from './HubChatPanel'
 import { HubConnectPanel } from './HubConnectPanel'
+import { ChatSessionsSidebarContainer } from '../../chat/ChatSessionsSidebarContainer'
 import { useHubStats } from './useHubStats'
 import { nextStage, isPanelMode } from './hubStage'
 import type { HomeStageEvent, HomeStageMode } from './hubStage'
@@ -58,6 +60,14 @@ export function HomeHub(): React.JSX.Element {
   const { chat } = useAppState()
   const stats = useHubStats()
   const [mode, setMode] = useState<HomeStageMode>('hub')
+  // Multi-session chat gate (default OFF — see preferences.multiChatEnabled).
+  // When off, the chat panel renders exactly as today; when on, the chat stage
+  // gains the sessions sidebar. Reactive so a Settings toggle applies live,
+  // matching the `useLegacyHomeDesign` pattern.
+  const [multiChat, setMultiChat] = useState<boolean>(
+    () => getPreferences().multiChatEnabled ?? false
+  )
+  useEffect(() => onPreferencesChange((p) => setMultiChat(p.multiChatEnabled ?? false)), [])
   // The draft is LOCAL (not in the app-wide chat hook) so typing re-renders only
   // the ask bar, not the shell and every mounted page.
   const [input, setInput] = useState('')
@@ -174,9 +184,32 @@ export function HomeHub(): React.JSX.Element {
           {isPanelMode(mode) ? (
             <StagePanel key={mode}>
               {mode === 'chat' ? (
-                <HubChatPanel messages={chat.history} sending={chat.sending}>
-                  {askBar}
-                </HubChatPanel>
+                multiChat ? (
+                  // Sessions sidebar + chat panel. The un-sessioned default
+                  // thread stays the shared cross-platform thread; the sidebar
+                  // only ADDS desktop-local sessions beside it.
+                  <div className="flex h-full w-full gap-3">
+                    <aside
+                      className="h-full w-[264px] shrink-0 overflow-hidden rounded-[26px] border"
+                      style={{
+                        borderColor: 'rgb(var(--home-stage-glow-rgb) / 0.14)',
+                        backgroundImage:
+                          'linear-gradient(to bottom, rgb(255 255 255 / 0.03), rgb(var(--home-stage-glow-rgb) / 0.05))'
+                      }}
+                    >
+                      <ChatSessionsSidebarContainer />
+                    </aside>
+                    <div className="min-w-0 flex-1">
+                      <HubChatPanel messages={chat.history} sending={chat.sending}>
+                        {askBar}
+                      </HubChatPanel>
+                    </div>
+                  </div>
+                ) : (
+                  <HubChatPanel messages={chat.history} sending={chat.sending}>
+                    {askBar}
+                  </HubChatPanel>
+                )
               ) : (
                 <HubConnectPanel onDismiss={() => dispatch({ type: 'dismissed' })} />
               )}

@@ -57,8 +57,7 @@ describe('filterSessions', () => {
 describe('groupSessionsByDate', () => {
   // Fixed "now": Tue 2026-07-14 12:00 local.
   const now = new Date(2026, 6, 14, 12, 0, 0).getTime()
-  const at = (y: number, m: number, d: number, h = 9): string =>
-    new Date(y, m, d, h).toISOString()
+  const at = (y: number, m: number, d: number, h = 9): string => new Date(y, m, d, h).toISOString()
 
   it('buckets by relative day into Today / Yesterday / Previous 7 Days / Previous 30 Days', () => {
     const groups = groupSessionsByDate(

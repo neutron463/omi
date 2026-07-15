@@ -1,4 +1,4 @@
-import { useCallback, useEffect, useMemo, useRef, useState } from 'react'
+import { useCallback, useEffect, useMemo, useState } from 'react'
 import type { ChatSession } from '../../../shared/chatSessions'
 import {
   createSession as createSessionApi,
@@ -82,36 +82,46 @@ export function useChatSessions(options?: { client?: SessionsClientLike }): UseC
   const [error, setError] = useState<string | null>(null)
   const [searchQuery, setSearchQuery] = useState('')
   const [showStarredOnly, setShowStarredOnly] = useState(false)
+  // Bumping this re-runs the fetch effect (retry, or a post-mutation re-query)
+  // without changing `showStarredOnly`.
+  const [reloadToken, setReloadToken] = useState(0)
 
-  // Generation guard: an in-flight load that a newer load supersedes must not
-  // clobber the fresher result (e.g. rapid Starred-filter toggling).
-  const loadGen = useRef(0)
-
-  const load = useCallback(
-    async (starredOnly: boolean) => {
-      const gen = ++loadGen.current
-      setLoading(true)
-      setError(null)
+  // The fetch is INLINED in the effect (not a shared setState-ing callback) and
+  // every write lands after the await, so the effect never triggers a
+  // synchronous setState. `loading` is owned by the initializer + the handlers
+  // below; a superseded fetch is cancelled by the effect cleanup.
+  useEffect(() => {
+    let cancelled = false
+    void (async () => {
       try {
-        const rows = await client.listSessions(starredOnly ? { starred: true } : {})
-        if (loadGen.current !== gen) return
+        const rows = await client.listSessions(showStarredOnly ? { starred: true } : {})
+        if (cancelled) return
         setSessions(rows)
+        setError(null)
       } catch (e) {
-        if (loadGen.current !== gen) return
+        if (cancelled) return
         setError(errorMessage(e))
       } finally {
-        if (loadGen.current === gen) setLoading(false)
+        if (!cancelled) setLoading(false)
       }
-    },
-    [client]
-  )
+    })()
+    return () => {
+      cancelled = true
+    }
+  }, [client, showStarredOnly, reloadToken])
 
-  useEffect(() => {
-    void load(showStarredOnly)
-  }, [load, showStarredOnly])
-
-  const toggleStarredFilter = useCallback(() => setShowStarredOnly((v) => !v), [])
-  const retryLoad = useCallback(() => void load(showStarredOnly), [load, showStarredOnly])
+  // Event handlers may setState freely (the effect restriction is the concern).
+  // Show the spinner, then let the effect fetch and clear it.
+  const toggleStarredFilter = useCallback(() => {
+    setError(null)
+    setLoading(true)
+    setShowStarredOnly((v) => !v)
+  }, [])
+  const retryLoad = useCallback(() => {
+    setError(null)
+    setLoading(true)
+    setReloadToken((t) => t + 1)
+  }, [])
   const selectSession = useCallback((id: string | null) => setCurrentSessionId(id), [])
 
   const createNewSession = useCallback(async (): Promise<ChatSession | null> => {
@@ -147,12 +157,12 @@ export function useChatSessions(options?: { client?: SessionsClientLike }): UseC
       if (showStarredOnly) {
         // The starred filter is a server query; re-run it so an unstarred row
         // drops out of (or a starred row is reflected in) the filtered view.
-        void load(true)
+        setReloadToken((t) => t + 1)
       } else {
         setSessions((prev) => prev.map((s) => (s.id === id ? { ...s, starred: next } : s)))
       }
     },
-    [client, sessions, showStarredOnly, load]
+    [client, sessions, showStarredOnly]
   )
 
   const removeSession = useCallback(

@@ -141,7 +141,10 @@ describe('saveMessage — shared-thread continuity guard', () => {
     const res = await saveMessage({ text: 'hello', sender: 'human' })
 
     const [, body] = api.post.mock.calls[0]
-    expect(api.post).toHaveBeenCalledWith('/v2/desktop/messages', { text: 'hello', sender: 'human' })
+    expect(api.post).toHaveBeenCalledWith('/v2/desktop/messages', {
+      text: 'hello',
+      sender: 'human'
+    })
     // The guard: no session/app key at all on the default-thread write.
     expect('session_id' in body).toBe(false)
     expect('app_id' in body).toBe(false)

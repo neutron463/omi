@@ -39,6 +39,7 @@ import { BackgroundConsentInterstitial } from './components/consent/BackgroundCo
 import { isSecondaryWindow } from './lib/windowRole'
 import { attachVoiceE2eHook } from './lib/voice/e2eHook'
 import { PrimitivesGallery } from './components/ui/__gallery/PrimitivesGallery'
+import { ChatSessionsSidebarGallery } from './components/chat/__gallery/ChatSessionsSidebarGallery'
 import { refreshIfStale } from './lib/voice/autoModelSelector'
 import { refreshAboutUserCard, resetAboutUserCard } from './lib/voice/aboutUser'
 import { refreshUserVocabulary, resetUserVocabulary } from './lib/ptt/userVocabulary'
@@ -287,6 +288,9 @@ function App(): React.JSX.Element {
             it tree-shakes out of packaged renderer builds; placed before the
             auth-gated catch-all so it renders without sign-in. */}
         {import.meta.env.DEV && <Route path="/__ui-gallery" element={<PrimitivesGallery />} />}
+        {import.meta.env.DEV && (
+          <Route path="/__chat-sessions-gallery" element={<ChatSessionsSidebarGallery />} />
+        )}
         <Route
           path="/login"
           element={
