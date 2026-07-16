@@ -45,7 +45,19 @@ describe('buildClaudeAuthUrl', () => {
     expect(u.searchParams.get('code_challenge_method')).toBe('S256')
     expect(u.searchParams.get('state')).toBe('STATE')
     expect(u.searchParams.get('redirect_uri')).toBe('http://localhost:51000/callback')
-    expect(u.searchParams.get('scope')).toBe('user:inference')
+    // The full Claude Code scope set (minus org:create_api_key, which throws
+    // "Unknown scope" for Max-subscription accounts). Decoded via searchParams.
+    expect(u.searchParams.get('scope')).toBe(
+      'user:profile user:inference user:sessions:claude_code user:mcp_servers'
+    )
+    // Spaces must be encoded (as + or %20), never left raw, and no trailing/
+    // double-encoding artifacts in the serialized query string.
+    const rawQuery = url.split('?')[1]
+    const scopeParam = rawQuery.split('&').find((p) => p.startsWith('scope='))
+    const rawScope = scopeParam!.slice('scope='.length)
+    expect(rawScope).not.toContain(' ')
+    expect(rawScope).not.toMatch(/%(?![0-9A-Fa-f]{2})/) // no lone/trailing %
+    expect(rawScope).not.toContain('%25') // scope was not double-encoded
     // Round-trips through the validator.
     expect(validateClaudeOAuthUrl(url)).not.toBeNull()
   })
@@ -196,20 +208,22 @@ describe('exchangeClaudeCodeForToken (request shape + response mapping)', () => 
     }
   })
 
-  it('POSTs the setup-token JSON body and maps the response to epoch-ms expiresAt', async () => {
-    let seen: { headers: Record<string, unknown>; body: Record<string, unknown> } | null = null
+  it('POSTs the setup-token form-urlencoded body and maps the response to epoch-ms expiresAt', async () => {
+    let seen: { headers: Record<string, unknown>; body: Record<string, string> } | null = null
     server = createServer((req, res) => {
       let raw = ''
       req.on('data', (c) => (raw += c))
       req.on('end', () => {
-        seen = { headers: req.headers, body: JSON.parse(raw) }
+        // Anthropic's token endpoint expects application/x-www-form-urlencoded;
+        // parse the body the same way to prove we send form encoding, not JSON.
+        seen = { headers: req.headers, body: Object.fromEntries(new URLSearchParams(raw)) }
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(
           JSON.stringify({
             access_token: 'AT',
             refresh_token: 'RT',
             expires_in: 3600,
-            scope: 'user:inference'
+            scope: 'user:profile user:inference user:sessions:claude_code user:mcp_servers'
           })
         )
       })
@@ -227,7 +241,9 @@ describe('exchangeClaudeCodeForToken (request shape + response mapping)', () => 
     )
 
     expect(seen).not.toBeNull()
-    expect(seen!.headers['content-type']).toContain('application/json')
+    expect(seen!.headers['content-type']).toContain('application/x-www-form-urlencoded')
+    // Raw body is form-encoded (key=value&…), not JSON.
+    expect(seen!.headers['content-type']).not.toContain('application/json')
     expect(seen!.body).toMatchObject({
       grant_type: 'authorization_code',
       code: 'the-code',
@@ -235,11 +251,16 @@ describe('exchangeClaudeCodeForToken (request shape + response mapping)', () => 
       client_id: '9d1c250a-e61b-44d9-88ed-5944d1962f5e',
       code_verifier: 'the-verifier',
       state: 'the-state',
-      expires_in: 31536000
+      expires_in: '31536000'
     })
     expect(result.accessToken).toBe('AT')
     expect(result.refreshToken).toBe('RT')
-    expect(result.scopes).toEqual(['user:inference'])
+    expect(result.scopes).toEqual([
+      'user:profile',
+      'user:inference',
+      'user:sessions:claude_code',
+      'user:mcp_servers'
+    ])
     expect(typeof result.expiresAt).toBe('number')
     expect(result.expiresAt!).toBeGreaterThanOrEqual(before + 3600 * 1000)
   })

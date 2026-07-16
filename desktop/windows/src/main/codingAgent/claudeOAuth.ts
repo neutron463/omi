@@ -32,7 +32,7 @@ const CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
 const AUTHORIZE_URL = 'https://claude.ai/oauth/authorize'
 const TOKEN_URL = 'https://console.anthropic.com/v1/oauth/token'
 const SUCCESS_URL = 'https://console.anthropic.com/oauth/code/success?app=claude-code'
-const SCOPES = 'user:inference'
+const SCOPES = 'user:profile user:inference user:sessions:claude_code user:mcp_servers'
 const TOKEN_EXPIRY_SECONDS = 31536000 // 1 year
 const CALLBACK_TIMEOUT_MS = 2 * 60 * 1000
 
@@ -243,8 +243,10 @@ interface RawTokenResponse {
 
 /**
  * Exchange an authorization code for tokens at the Claude token endpoint. Body
- * shape matches the CLI setup-token flow (JSON, including `expires_in` and the
- * echoed `state`). Uses global `fetch` so it can be tested against a local mock.
+ * shape matches the CLI setup-token flow (`application/x-www-form-urlencoded`,
+ * including `expires_in` and the echoed `state`). Anthropic's current token
+ * endpoint rejects a JSON body with 400 — it expects form encoding. Uses global
+ * `fetch` so it can be tested against a local mock.
  */
 export async function exchangeClaudeCodeForToken(
   code: string,
@@ -255,16 +257,16 @@ export async function exchangeClaudeCodeForToken(
 ): Promise<ClaudeOAuthResult> {
   const res = await fetch(tokenUrl, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({
+    headers: { 'Content-Type': 'application/x-www-form-urlencoded' },
+    body: new URLSearchParams({
       grant_type: 'authorization_code',
       code,
       redirect_uri: redirectUri,
       client_id: CLIENT_ID,
       code_verifier: codeVerifier,
       state,
-      expires_in: TOKEN_EXPIRY_SECONDS
-    })
+      expires_in: String(TOKEN_EXPIRY_SECONDS)
+    }).toString()
   })
   if (res.status === 401) {
     throw new Error('Authentication failed: invalid authorization code')
