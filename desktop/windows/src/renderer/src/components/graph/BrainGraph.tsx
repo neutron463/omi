@@ -311,7 +311,10 @@ function GraphScene({
   shuffleKey,
   frameLoop = 'always'
 }: BrainGraphProps): React.JSX.Element {
-  const { sim, nodes, reduced } = useGraphSimulation(graph, centerNodeId)
+  // SPIKE (spike/win-memory-graph-3d): the interactive full-screen brain map runs
+  // the layout in 3D (OrbitControls lets the user rotate to read depth); the fixed-
+  // camera surfaces (onboarding, inline Memories card) stay 2D for label clarity.
+  const { sim, nodes, reduced } = useGraphSimulation(graph, centerNodeId, interactive ? 3 : 2)
   const invalidate = useThree((state) => state.invalidate)
 
   // Eased on-screen position of each node, written by the meshes and read by the
@@ -353,6 +356,11 @@ function GraphScene({
     <>
       <ambientLight intensity={0.8} />
       <directionalLight position={[200, 300, 400]} intensity={0.6} />
+      {/* SPIKE: depth fog in 3D so far nodes/edges recede — a cheap depth cue.
+          (Billboard labels use troika's own shader and don't fog, so this thins
+          the sphere/line clutter but not the titles; label-distance fade is the
+          next mitigation — see the feasibility writeup.) */}
+      {interactive && <fog attach="fog" args={[0x0a0a0f, 500, 1400]} />}
       <GraphEdges sim={sim} edges={graph.edges} posMap={posMap} />
       {/* eslint-disable-next-line react-hooks/refs -- posMap is a lazy-init ref read here to glue edges/nodes to eased positions; intentional */}
       {nodes.map((n) => (
