@@ -27,35 +27,62 @@ afterEach(() => {
   while (tempDirs.length) rmSync(tempDirs.pop()!, { recursive: true, force: true })
 })
 
-// A valid loopback authorize URL, matching what buildClaudeAuthUrl emits.
+// The full subscription scope set the bundled Claude Code CLI requests, in order.
+const EXPECTED_SCOPES =
+  'user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload'
+
+// A valid loopback authorize URL on the LIVE endpoint, matching what
+// buildClaudeAuthUrl emits (claude.com/cai/oauth/authorize, not the retired
+// claude.ai/oauth/authorize).
 const VALID_URL =
-  'https://claude.ai/oauth/authorize?response_type=code&client_id=test-client&redirect_uri=http%3A%2F%2Flocalhost%3A43123%2Fcallback&state=test-state&code_challenge=test-challenge&code_challenge_method=S256'
+  'https://claude.com/cai/oauth/authorize?response_type=code&client_id=test-client&redirect_uri=http%3A%2F%2Flocalhost%3A43123%2Fcallback&state=test-state&code_challenge=test-challenge&code_challenge_method=S256'
 
 describe('buildClaudeAuthUrl', () => {
-  it('emits a claude.ai PKCE authorize URL its own validator accepts', () => {
+  it('emits a claude.com/cai PKCE authorize URL its own validator accepts', () => {
     const url = buildClaudeAuthUrl({
       redirectUri: 'http://localhost:51000/callback',
       challenge: 'CHAL',
       state: 'STATE'
     })
     const u = new URL(url)
-    expect(u.origin + u.pathname).toBe('https://claude.ai/oauth/authorize')
+    // Live subscription authorize endpoint — NOT the retired claude.ai host.
+    expect(u.origin + u.pathname).toBe('https://claude.com/cai/oauth/authorize')
     expect(u.searchParams.get('response_type')).toBe('code')
     expect(u.searchParams.get('code_challenge')).toBe('CHAL')
     expect(u.searchParams.get('code_challenge_method')).toBe('S256')
     expect(u.searchParams.get('state')).toBe('STATE')
     expect(u.searchParams.get('redirect_uri')).toBe('http://localhost:51000/callback')
-    expect(u.searchParams.get('scope')).toBe('user:inference')
+    // Regression guard: `code=true` selects the manual copy-paste format and,
+    // with a loopback redirect_uri, makes the request "Invalid request format".
+    // The loopback flow must NOT send it.
+    expect(u.searchParams.has('code')).toBe(false)
+    // The full Claude Code subscription scope set (incl. user:file_upload; minus
+    // org:create_api_key, which throws "Unknown scope" for Max accounts).
+    expect(u.searchParams.get('scope')).toBe(EXPECTED_SCOPES)
+    // Spaces must be encoded (as + or %20), never left raw, and no trailing/
+    // double-encoding artifacts in the serialized query string.
+    const rawQuery = url.split('?')[1]
+    const scopeParam = rawQuery.split('&').find((p) => p.startsWith('scope='))
+    const rawScope = scopeParam!.slice('scope='.length)
+    expect(rawScope).not.toContain(' ')
+    expect(rawScope).not.toMatch(/%(?![0-9A-Fa-f]{2})/) // no lone/trailing %
+    expect(rawScope).not.toContain('%25') // scope was not double-encoded
     // Round-trips through the validator.
     expect(validateClaudeOAuthUrl(url)).not.toBeNull()
   })
 })
 
 describe('validateClaudeOAuthUrl', () => {
-  it('accepts the canonical claude.ai loopback authorize URL', () => {
+  it('accepts the canonical claude.com/cai loopback authorize URL', () => {
     const url = validateClaudeOAuthUrl(VALID_URL)
-    expect(url?.host).toBe('claude.ai')
-    expect(url?.pathname).toBe('/oauth/authorize')
+    expect(url?.host).toBe('claude.com')
+    expect(url?.pathname).toBe('/cai/oauth/authorize')
+  })
+
+  it('rejects the retired claude.ai authorize host (regression: stale endpoint)', () => {
+    const stale =
+      'https://claude.ai/oauth/authorize?response_type=code&client_id=c&redirect_uri=http%3A%2F%2Flocalhost%3A43123%2Fcallback&state=s&code_challenge=c&code_challenge_method=S256'
+    expect(validateClaudeOAuthUrl(stale)).toBeNull()
   })
 
   it('rejects unexpected hosts, paths, missing PKCE params, and non-loopback redirects', () => {
@@ -64,19 +91,21 @@ describe('validateClaudeOAuthUrl', () => {
       undefined,
       'not a url',
       // wrong host
-      'https://evil.example/oauth/authorize?response_type=code&client_id=c&redirect_uri=http%3A%2F%2Flocalhost%3A43123%2Fcallback&state=s&code_challenge=c&code_challenge_method=S256',
-      // wrong path
-      'https://claude.ai/other?response_type=code&client_id=c&redirect_uri=http%3A%2F%2Flocalhost%3A43123%2Fcallback&state=s&code_challenge=c&code_challenge_method=S256',
+      'https://evil.example/cai/oauth/authorize?response_type=code&client_id=c&redirect_uri=http%3A%2F%2Flocalhost%3A43123%2Fcallback&state=s&code_challenge=c&code_challenge_method=S256',
+      // right host, wrong path (the retired /oauth/authorize path on claude.com)
+      'https://claude.com/oauth/authorize?response_type=code&client_id=c&redirect_uri=http%3A%2F%2Flocalhost%3A43123%2Fcallback&state=s&code_challenge=c&code_challenge_method=S256',
+      // right host, other path
+      'https://claude.com/other?response_type=code&client_id=c&redirect_uri=http%3A%2F%2Flocalhost%3A43123%2Fcallback&state=s&code_challenge=c&code_challenge_method=S256',
       // missing code_challenge_method
-      'https://claude.ai/oauth/authorize?response_type=code&client_id=c&redirect_uri=http%3A%2F%2Flocalhost%3A43123%2Fcallback&state=s&code_challenge=c',
+      'https://claude.com/cai/oauth/authorize?response_type=code&client_id=c&redirect_uri=http%3A%2F%2Flocalhost%3A43123%2Fcallback&state=s&code_challenge=c',
       // wrong code_challenge_method
-      'https://claude.ai/oauth/authorize?response_type=code&client_id=c&redirect_uri=http%3A%2F%2Flocalhost%3A43123%2Fcallback&state=s&code_challenge=c&code_challenge_method=plain',
+      'https://claude.com/cai/oauth/authorize?response_type=code&client_id=c&redirect_uri=http%3A%2F%2Flocalhost%3A43123%2Fcallback&state=s&code_challenge=c&code_challenge_method=plain',
       // non-loopback redirect host
-      'https://claude.ai/oauth/authorize?response_type=code&client_id=c&redirect_uri=https%3A%2F%2Fexample.com%2Fcallback&state=s&code_challenge=c&code_challenge_method=S256',
+      'https://claude.com/cai/oauth/authorize?response_type=code&client_id=c&redirect_uri=https%3A%2F%2Fexample.com%2Fcallback&state=s&code_challenge=c&code_challenge_method=S256',
       // http (not https) authorize
-      'http://claude.ai/oauth/authorize?response_type=code&client_id=c&redirect_uri=http%3A%2F%2Flocalhost%3A43123%2Fcallback&state=s&code_challenge=c&code_challenge_method=S256',
-      // explicit port on claude.ai
-      'https://claude.ai:8443/oauth/authorize?response_type=code&client_id=c&redirect_uri=http%3A%2F%2Flocalhost%3A43123%2Fcallback&state=s&code_challenge=c&code_challenge_method=S256'
+      'http://claude.com/cai/oauth/authorize?response_type=code&client_id=c&redirect_uri=http%3A%2F%2Flocalhost%3A43123%2Fcallback&state=s&code_challenge=c&code_challenge_method=S256',
+      // explicit port on claude.com
+      'https://claude.com:8443/cai/oauth/authorize?response_type=code&client_id=c&redirect_uri=http%3A%2F%2Flocalhost%3A43123%2Fcallback&state=s&code_challenge=c&code_challenge_method=S256'
     ]
     for (const u of invalid) {
       expect(validateClaudeOAuthUrl(u), `expected reject: ${u}`).toBeNull()
@@ -88,14 +117,14 @@ describe('isNewClaudeOAuthAttempt (one-launch latch reset)', () => {
   it('same URL is the same in-flight attempt; a different URL is a new attempt', () => {
     expect(
       isNewClaudeOAuthAttempt(
-        'https://claude.ai/oauth/authorize?state=current',
-        'https://claude.ai/oauth/authorize?state=current'
+        'https://claude.com/cai/oauth/authorize?state=current',
+        'https://claude.com/cai/oauth/authorize?state=current'
       )
     ).toBe(false)
     expect(
       isNewClaudeOAuthAttempt(
-        'https://claude.ai/oauth/authorize?state=expired',
-        'https://claude.ai/oauth/authorize?state=retry'
+        'https://claude.com/cai/oauth/authorize?state=expired',
+        'https://claude.com/cai/oauth/authorize?state=retry'
       )
     ).toBe(true)
   })
@@ -196,12 +225,15 @@ describe('exchangeClaudeCodeForToken (request shape + response mapping)', () => 
     }
   })
 
-  it('POSTs the setup-token JSON body and maps the response to epoch-ms expiresAt', async () => {
+  it('POSTs a JSON body with the anthropic-beta gate and maps the response to epoch-ms expiresAt', async () => {
     let seen: { headers: Record<string, unknown>; body: Record<string, unknown> } | null = null
     server = createServer((req, res) => {
       let raw = ''
       req.on('data', (c) => (raw += c))
       req.on('end', () => {
+        // The platform.claude.com token endpoint expects a JSON body (the same
+        // shape the SDK sends on refresh) — parse as JSON to prove we don't send
+        // form encoding.
         seen = { headers: req.headers, body: JSON.parse(raw) }
         res.writeHead(200, { 'Content-Type': 'application/json' })
         res.end(
@@ -209,7 +241,7 @@ describe('exchangeClaudeCodeForToken (request shape + response mapping)', () => 
             access_token: 'AT',
             refresh_token: 'RT',
             expires_in: 3600,
-            scope: 'user:inference'
+            scope: EXPECTED_SCOPES
           })
         )
       })
@@ -228,6 +260,8 @@ describe('exchangeClaudeCodeForToken (request shape + response mapping)', () => 
 
     expect(seen).not.toBeNull()
     expect(seen!.headers['content-type']).toContain('application/json')
+    // Beta gate the token endpoint requires (matches the SDK's own refresh call).
+    expect(seen!.headers['anthropic-beta']).toBe('oauth-2025-04-20')
     expect(seen!.body).toMatchObject({
       grant_type: 'authorization_code',
       code: 'the-code',
@@ -239,7 +273,13 @@ describe('exchangeClaudeCodeForToken (request shape + response mapping)', () => 
     })
     expect(result.accessToken).toBe('AT')
     expect(result.refreshToken).toBe('RT')
-    expect(result.scopes).toEqual(['user:inference'])
+    expect(result.scopes).toEqual([
+      'user:profile',
+      'user:inference',
+      'user:sessions:claude_code',
+      'user:mcp_servers',
+      'user:file_upload'
+    ])
     expect(typeof result.expiresAt).toBe('number')
     expect(result.expiresAt!).toBeGreaterThanOrEqual(before + 3600 * 1000)
   })
@@ -252,7 +292,13 @@ describe('exchangeClaudeCodeForToken (request shape + response mapping)', () => 
     await new Promise<void>((r) => server!.listen(0, '127.0.0.1', r))
     const port = (server.address() as { port: number }).port
     await expect(
-      exchangeClaudeCodeForToken('c', 'v', 's', 'http://localhost:1/callback', `http://127.0.0.1:${port}/token`)
+      exchangeClaudeCodeForToken(
+        'c',
+        'v',
+        's',
+        'http://localhost:1/callback',
+        `http://127.0.0.1:${port}/token`
+      )
     ).rejects.toThrow(/Token exchange failed \(400\)/)
   })
 })

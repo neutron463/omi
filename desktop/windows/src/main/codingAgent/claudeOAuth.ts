@@ -1,6 +1,6 @@
 // Claude Code sign-in — the Windows port of macOS's agent/src/oauth-flow.ts.
-// Reimplements the `setup-token` PKCE + loopback flow the Claude Code CLI uses,
-// so a fresh-install user can authenticate the built-in Claude Code agent from
+// Reimplements the PKCE + loopback flow the Claude Code CLI uses, so a
+// fresh-install user can authenticate the built-in Claude Code agent from
 // inside Omi (no CLI install, no manual `claude /login`).
 //
 // This module is deliberately Electron-free (node builtins + global `fetch`
@@ -19,6 +19,28 @@
 // survive a re-sign-in. `expiresAt` is stored as epoch milliseconds (a NUMBER),
 // matching the real on-disk file the SDK produces — a deliberate, verified
 // deviation from the macOS port, which wrote an ISO string.
+//
+// ── OAuth endpoints: DO NOT "fix" these back to claude.ai / console.anthropic ──
+// Anthropic migrated the Claude-subscription OAuth endpoints. The endpoints
+// below are extracted VERBATIM from the exact CLI + SDK this app bundles and
+// runs — `@anthropic-ai/claude-agent-sdk` 0.3.205 / `claude.exe` (Claude Code
+// 2.1.205, build 4cf2699a, 2026-07-08), the same binary the SDK spawns:
+//
+//   CLAUDE_AI_AUTHORIZE_URL : https://claude.com/cai/oauth/authorize   (subscription)
+//   TOKEN_URL               : https://platform.claude.com/v1/oauth/token
+//   CLAUDEAI_SUCCESS_URL    : https://platform.claude.com/oauth/code/success?app=claude-code
+//   CLIENT_ID               : 9d1c250a-e61b-44d9-88ed-5944d1962f5e
+//   scopes (subscription)   : user:profile user:inference user:sessions:claude_code
+//                             user:mcp_servers user:file_upload
+//   token headers           : Content-Type: application/json + anthropic-beta: oauth-2025-04-20
+//
+// The retired `https://claude.ai/oauth/authorize` endpoint still RENDERS a
+// consent screen, but its issuance backend now rejects the request with
+// "Invalid request format" the moment the user clicks Authorize (no code is
+// ever issued, the loopback callback never fires). `CLAUDE_AI_ORIGIN` in the
+// SDK is still "https://claude.ai" — building the URL as
+// `${origin}/oauth/authorize` is the trap that produced the stale endpoint.
+// The real authorize URL is a distinct constant on the claude.com host.
 
 import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'http'
 import { readFileSync, writeFileSync, mkdirSync } from 'fs'
@@ -26,13 +48,24 @@ import { homedir } from 'os'
 import { join, dirname } from 'path'
 import { generateVerifier, challengeFromVerifier, generateState } from '../integrations/oauthPkce'
 
-// --- Constants (from the Claude Code CLI setup-token flow) ---
+// --- Constants (extracted from the bundled Claude Code CLI / SDK; see header) ---
 
 const CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
-const AUTHORIZE_URL = 'https://claude.ai/oauth/authorize'
-const TOKEN_URL = 'https://console.anthropic.com/v1/oauth/token'
-const SUCCESS_URL = 'https://console.anthropic.com/oauth/code/success?app=claude-code'
-const SCOPES = 'user:inference'
+const AUTHORIZE_URL = 'https://claude.com/cai/oauth/authorize'
+const AUTHORIZE_HOST = 'claude.com'
+const AUTHORIZE_PATH = '/cai/oauth/authorize'
+const TOKEN_URL = 'https://platform.claude.com/v1/oauth/token'
+const SUCCESS_URL = 'https://platform.claude.com/oauth/code/success?app=claude-code'
+// The exact claude.ai subscription scope set the real Claude Code CLI requests
+// (SDK constant `A5`, in order). `org:create_api_key` is the Console/API-key
+// flow scope and is correctly excluded — it throws "Unknown scope" for a
+// Max-subscription consent. A single `user:inference` is accepted for the
+// consent screen but rejected at code-issuance, so the full set is required.
+const SCOPES =
+  'user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload'
+// Beta gate the platform.claude.com token endpoint expects (SDK sends this on
+// every /v1/oauth/token call, including token refresh).
+const OAUTH_BETA_HEADER = 'oauth-2025-04-20'
 const TOKEN_EXPIRY_SECONDS = 31536000 // 1 year
 const CALLBACK_TIMEOUT_MS = 2 * 60 * 1000
 
@@ -105,7 +138,10 @@ export function claudeAuthStatus(env: NodeJS.ProcessEnv = process.env): ClaudeAu
  * Persist a `claudeAiOauth` block, preserving every other top-level key and any
  * extra subkeys the SDK maintains. Never clobbers `mcpOAuth` or other content.
  */
-export function writeClaudeCredentials(oauth: ClaudeAiOauth, env: NodeJS.ProcessEnv = process.env): void {
+export function writeClaudeCredentials(
+  oauth: ClaudeAiOauth,
+  env: NodeJS.ProcessEnv = process.env
+): void {
   const existing = readCredentialsFile(env) ?? {}
   const priorOauth =
     existing.claudeAiOauth && typeof existing.claudeAiOauth === 'object'
@@ -131,14 +167,18 @@ export function removeClaudeCredentials(env: NodeJS.ProcessEnv = process.env): v
 
 // --- Authorization URL (build + validate) ---
 
-/** Build the claude.ai authorize URL for a PKCE loopback attempt. */
+/** Build the Claude subscription authorize URL for a PKCE loopback attempt. */
 export function buildClaudeAuthUrl(params: {
   redirectUri: string
   challenge: string
   state: string
 }): string {
   const url = new URL(AUTHORIZE_URL)
-  url.searchParams.set('code', 'true')
+  // Do NOT set `code=true`. That flag selects the manual/headless copy-paste
+  // response format (redirect to platform.claude.com/oauth/code/callback where
+  // the user pastes `code#state` back). The loopback flow the CLI runs for a
+  // desktop with a browser omits it; sending it WITH a localhost redirect_uri
+  // makes the authorize request "Invalid request format".
   url.searchParams.set('client_id', CLIENT_ID)
   url.searchParams.set('response_type', 'code')
   url.searchParams.set('redirect_uri', params.redirectUri)
@@ -152,8 +192,8 @@ export function buildClaudeAuthUrl(params: {
 /**
  * Validate a Claude OAuth authorize URL before opening it in the browser —
  * port of macOS ChatProvider.validatedClaudeOAuthURL. Returns the parsed URL
- * when it is exactly an https://claude.ai/oauth/authorize PKCE request with a
- * localhost loopback redirect, else null. Guards against opening an attacker-
+ * when it is exactly an https://claude.com/cai/oauth/authorize PKCE request with
+ * a localhost loopback redirect, else null. Guards against opening an attacker-
  * substituted URL.
  */
 export function validateClaudeOAuthUrl(urlString: string | null | undefined): URL | null {
@@ -166,9 +206,9 @@ export function validateClaudeOAuthUrl(urlString: string | null | undefined): UR
   }
   if (
     url.protocol !== 'https:' ||
-    url.hostname.toLowerCase() !== 'claude.ai' ||
+    url.hostname.toLowerCase() !== AUTHORIZE_HOST ||
     url.port !== '' ||
-    url.pathname !== '/oauth/authorize' ||
+    url.pathname !== AUTHORIZE_PATH ||
     url.username !== '' ||
     url.password !== '' ||
     url.hash !== ''
@@ -242,9 +282,11 @@ interface RawTokenResponse {
 }
 
 /**
- * Exchange an authorization code for tokens at the Claude token endpoint. Body
- * shape matches the CLI setup-token flow (JSON, including `expires_in` and the
- * echoed `state`). Uses global `fetch` so it can be tested against a local mock.
+ * Exchange an authorization code for tokens at the Claude token endpoint
+ * (`platform.claude.com/v1/oauth/token`). Body + headers mirror the SDK's own
+ * proven call to this endpoint: a JSON body carrying the PKCE `code_verifier`
+ * and echoed `state`, plus the `anthropic-beta: oauth-2025-04-20` gate. Uses
+ * global `fetch` so it can be tested against a local mock.
  */
 export async function exchangeClaudeCodeForToken(
   code: string,
@@ -255,7 +297,10 @@ export async function exchangeClaudeCodeForToken(
 ): Promise<ClaudeOAuthResult> {
   const res = await fetch(tokenUrl, {
     method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
+    headers: {
+      'Content-Type': 'application/json',
+      'anthropic-beta': OAUTH_BETA_HEADER
+    },
     body: JSON.stringify({
       grant_type: 'authorization_code',
       code,
