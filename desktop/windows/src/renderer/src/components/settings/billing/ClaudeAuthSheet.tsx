@@ -66,8 +66,8 @@ export function ClaudeAuthSheet(): React.JSX.Element {
       {showPaste ? (
         <div className="mt-4 border-t border-white/10 pt-4">
           <p className="text-xs text-text-tertiary">
-            Already have a Claude subscription? After you approve in the browser, paste the code it
-            shows to connect Claude — no purchase needed.
+            Already have a Claude subscription? Approve in your browser, then copy the code it shows
+            and paste it below to connect Claude — no purchase needed.
           </p>
           <input
             type="text"
