@@ -45,10 +45,11 @@ describe('buildClaudeAuthUrl', () => {
     expect(u.searchParams.get('code_challenge_method')).toBe('S256')
     expect(u.searchParams.get('state')).toBe('STATE')
     expect(u.searchParams.get('redirect_uri')).toBe('http://localhost:51000/callback')
-    // The full Claude Code scope set (minus org:create_api_key, which throws
-    // "Unknown scope" for Max-subscription accounts). Decoded via searchParams.
+    // The full claude.ai/subscription scope set (5 scopes; minus org:create_api_key,
+    // which belongs to the Console-account array and throws "Unknown scope" for
+    // Max-subscription accounts). Decoded via searchParams.
     expect(u.searchParams.get('scope')).toBe(
-      'user:profile user:inference user:sessions:claude_code user:mcp_servers'
+      'user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload'
     )
     // Spaces must be encoded (as + or %20), never left raw, and no trailing/
     // double-encoding artifacts in the serialized query string.
@@ -223,7 +224,7 @@ describe('exchangeClaudeCodeForToken (request shape + response mapping)', () => 
             access_token: 'AT',
             refresh_token: 'RT',
             expires_in: 3600,
-            scope: 'user:profile user:inference user:sessions:claude_code user:mcp_servers'
+            scope: 'user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload'
           })
         )
       })
@@ -259,7 +260,8 @@ describe('exchangeClaudeCodeForToken (request shape + response mapping)', () => 
       'user:profile',
       'user:inference',
       'user:sessions:claude_code',
-      'user:mcp_servers'
+      'user:mcp_servers',
+      'user:file_upload'
     ])
     expect(typeof result.expiresAt).toBe('number')
     expect(result.expiresAt!).toBeGreaterThanOrEqual(before + 3600 * 1000)

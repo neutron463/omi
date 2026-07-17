@@ -30,9 +30,13 @@ import { generateVerifier, challengeFromVerifier, generateState } from '../integ
 
 const CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
 const AUTHORIZE_URL = 'https://claude.ai/oauth/authorize'
+// The real Claude Code client posts to https://platform.claude.com/v1/oauth/token;
+// console.anthropic.com is a legacy-but-live alias (verified: returns a direct 429,
+// no redirect, body preserved). Kept as-is because it works today — switch to
+// platform.claude.com only if this alias is ever sunset.
 const TOKEN_URL = 'https://console.anthropic.com/v1/oauth/token'
 const SUCCESS_URL = 'https://console.anthropic.com/oauth/code/success?app=claude-code'
-const SCOPES = 'user:profile user:inference user:sessions:claude_code user:mcp_servers'
+const SCOPES = 'user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload'
 const TOKEN_EXPIRY_SECONDS = 31536000 // 1 year
 const CALLBACK_TIMEOUT_MS = 2 * 60 * 1000
 
@@ -380,6 +384,13 @@ export async function startClaudeOAuthFlow(
     waitForCallback(server, state, logErr)
       .then(async (code) => {
         if (cancelled) return
+        // Diagnostic only — NEVER log the full code (it's a secret). Length +
+        // first 40 chars make a surprise visible: some Claude OAuth flows with
+        // `code=true` return a combined `{code}#{state}` value that would need
+        // splitting before exchange. A plain separate-params code is expected;
+        // if a future Connect fails with "Invalid request format", this reveals
+        // whether the server sent a combined value.
+        logErr(`Claude OAuth code received (length=${code.length}, prefix=${code.slice(0, 40)})`)
         logErr('Exchanging Claude authorization code for tokens...')
         const tokens = await exchangeClaudeCodeForToken(code, codeVerifier, state, redirectUri)
         writeClaudeCredentials(
