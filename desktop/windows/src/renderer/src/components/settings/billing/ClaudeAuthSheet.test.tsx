@@ -5,13 +5,19 @@ import { ClaudeAuthSheet } from './ClaudeAuthSheet'
 import { beginClaudeSignIn, __resetClaudeSignIn } from '../../../lib/claudeSignIn'
 
 const codingAgentStartAuth = vi.fn()
+const codingAgentSubmitAuthCode = vi.fn()
 const openExternalUrl = vi.fn()
 
 beforeEach(() => {
   codingAgentStartAuth.mockReset().mockReturnValue(new Promise(() => {})) // stays pending → sheet stays open
+  codingAgentSubmitAuthCode.mockReset().mockResolvedValue({
+    ok: true,
+    status: { connected: true, expiresAt: 1 }
+  })
   openExternalUrl.mockReset().mockResolvedValue(true)
   ;(globalThis as unknown as { window: { omi: unknown } }).window.omi = {
     codingAgentStartAuth,
+    codingAgentSubmitAuthCode,
     openExternalUrl
   }
   __resetClaudeSignIn()
@@ -58,7 +64,7 @@ describe('ClaudeAuthSheet', () => {
     await waitFor(() => expect(screen.queryByText('Unlock Omi Pro for $199/month')).toBeNull())
   })
 
-  it('auto-closes when the parallel OAuth completes (granted bypass)', async () => {
+  it('auto-closes when the account is already connected (granted bypass)', async () => {
     let resolveAuth!: (v: unknown) => void
     codingAgentStartAuth.mockReturnValue(new Promise((res) => (resolveAuth = res)))
     render(<ClaudeAuthSheet />)
@@ -67,6 +73,25 @@ describe('ClaudeAuthSheet', () => {
 
     resolveAuth({ ok: true, status: { connected: true, expiresAt: 1 } })
 
+    await waitFor(() => expect(screen.queryByText('Unlock Omi Pro for $199/month')).toBeNull())
+  })
+
+  it('shows the paste box once the browser opens, and connects on submit', async () => {
+    codingAgentStartAuth.mockResolvedValue({
+      ok: true,
+      awaitingCode: true,
+      status: { connected: false, expiresAt: null }
+    })
+    render(<ClaudeAuthSheet />)
+    beginClaudeSignIn()
+
+    // Paste box appears once the browser is open (awaitingCode phase).
+    const input = await screen.findByPlaceholderText('Paste code here')
+    fireEvent.change(input, { target: { value: 'the-code#the-state' } })
+    fireEvent.click(screen.getByRole('button', { name: 'Connect Claude' }))
+
+    expect(codingAgentSubmitAuthCode).toHaveBeenCalledWith('the-code#the-state')
+    // Successful submit closes the sheet.
     await waitFor(() => expect(screen.queryByText('Unlock Omi Pro for $199/month')).toBeNull())
   })
 })

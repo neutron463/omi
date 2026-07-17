@@ -1166,9 +1166,14 @@ export type OmiBridgeApi = {
   ) => Promise<CodingAgentTestResult>
   /** Whether the built-in Claude Code agent has usable credentials. */
   codingAgentAuthStatus: () => Promise<CodingAgentAuthStatus>
-  /** Run the Claude Code sign-in: loopback PKCE flow + open the browser, then
-   *  write credentials. Resolves with the post-sign-in status. */
+  /** Start the Claude Code sign-in: build the manual PKCE authorize URL and open
+   *  the browser. Resolves with `awaitingCode` once opened; the user then pastes
+   *  the code from the callback page via `codingAgentSubmitAuthCode`. */
   codingAgentStartAuth: () => Promise<CodingAgentStartAuthResult>
+  /** Complete the Claude Code sign-in with the code copied from the browser
+   *  (accepts the `code#state` string or the full callback URL). Writes
+   *  credentials and resolves with the post-sign-in status. */
+  codingAgentSubmitAuthCode: (code: string) => Promise<CodingAgentSubmitAuthResult>
   /** Sign out of Claude Code (drop only its stored credentials). */
   codingAgentSignOut: () => Promise<CodingAgentAuthStatus>
   onCodingAgentEvent: (cb: (event: CodingAgentEvent) => void) => () => void
@@ -1371,8 +1376,19 @@ export type CodingAgentAuthStatus = {
   expiresAt: number | null
 }
 
-/** Outcome of the Claude Code sign-in flow. */
+/** Outcome of starting the Claude Code sign-in. `ok` + `awaitingCode` means the
+ *  browser opened and we're waiting for the user to paste the code; `ok` without
+ *  `awaitingCode` means already connected; `ok:false` carries the error. */
 export type CodingAgentStartAuthResult = {
+  ok: boolean
+  /** True once the browser opened and the flow is waiting for a pasted code. */
+  awaitingCode?: boolean
+  error?: string
+  status: CodingAgentAuthStatus
+}
+
+/** Outcome of submitting the pasted Claude authorization code. */
+export type CodingAgentSubmitAuthResult = {
   ok: boolean
   error?: string
   status: CodingAgentAuthStatus

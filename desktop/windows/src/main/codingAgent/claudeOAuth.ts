@@ -1,12 +1,11 @@
-// Claude Code sign-in — the Windows port of macOS's agent/src/oauth-flow.ts.
-// Reimplements the PKCE + loopback flow the Claude Code CLI uses, so a
-// fresh-install user can authenticate the built-in Claude Code agent from
+// Claude Code sign-in — matches the real Claude Code CLI's subscription login.
+// A fresh-install user can authenticate the built-in Claude Code agent from
 // inside Omi (no CLI install, no manual `claude /login`).
 //
 // This module is deliberately Electron-free (node builtins + global `fetch`
-// only) so the URL builder/validator, token-exchange request shape, and the
-// credentials-file merge logic are all unit-testable under node Vitest. The
-// browser-open + IPC glue lives in ../ipc/codingAgent.ts.
+// only) so the URL builder/validator, code parser, token-exchange request
+// shape, and the credentials-file merge logic are all unit-testable under node
+// Vitest. The browser-open + IPC glue lives in ../ipc/codingAgent.ts.
 //
 // Credential storage: the @anthropic-ai/claude-agent-sdk (pinned in
 // node_modules) reads `<CLAUDE_CONFIG_DIR or ~/.claude>/.credentials.json` with
@@ -17,57 +16,54 @@
 // other top-level keys (e.g. `mcpOAuth`) and extra `claudeAiOauth` subkeys the
 // SDK maintains (`subscriptionType`, `rateLimitTier`, `refreshTokenExpiresAt`)
 // survive a re-sign-in. `expiresAt` is stored as epoch milliseconds (a NUMBER),
-// matching the real on-disk file the SDK produces — a deliberate, verified
-// deviation from the macOS port, which wrote an ISO string.
+// matching the real on-disk file the SDK produces.
 //
-// ── OAuth endpoints: DO NOT "fix" these back to claude.ai / console.anthropic ──
-// Anthropic migrated the Claude-subscription OAuth endpoints. The endpoints
-// below are extracted VERBATIM from the exact CLI + SDK this app bundles and
-// runs — `@anthropic-ai/claude-agent-sdk` 0.3.205 / `claude.exe` (Claude Code
-// 2.1.205, build 4cf2699a, 2026-07-08), the same binary the SDK spawns:
+// ── This is the MANUAL flow, not a localhost loopback. Do not "restore" loopback ──
+// Every value below was captured VERBATIM from the exact CLI this app bundles
+// and spawns — `claude auth login --claudeai` in `@anthropic-ai/claude-agent-sdk`
+// 0.3.205 / `claude.exe` 2.1.205 (build 4cf2699a). The captured authorize URL:
 //
-//   CLAUDE_AI_AUTHORIZE_URL : https://claude.com/cai/oauth/authorize   (subscription)
-//   TOKEN_URL               : https://platform.claude.com/v1/oauth/token
-//   CLAUDEAI_SUCCESS_URL    : https://platform.claude.com/oauth/code/success?app=claude-code
-//   CLIENT_ID               : 9d1c250a-e61b-44d9-88ed-5944d1962f5e
-//   scopes (subscription)   : user:profile user:inference user:sessions:claude_code
-//                             user:mcp_servers user:file_upload
-//   token headers           : Content-Type: application/json + anthropic-beta: oauth-2025-04-20
+//   https://claude.com/cai/oauth/authorize
+//     ?code=true
+//     &client_id=9d1c250a-e61b-44d9-88ed-5944d1962f5e
+//     &response_type=code
+//     &redirect_uri=https://platform.claude.com/oauth/code/callback
+//     &scope=org:create_api_key user:profile user:inference
+//            user:sessions:claude_code user:mcp_servers user:file_upload
+//     &code_challenge=<S256>&code_challenge_method=S256&state=<...>
 //
-// The retired `https://claude.ai/oauth/authorize` endpoint still RENDERS a
-// consent screen, but its issuance backend now rejects the request with
-// "Invalid request format" the moment the user clicks Authorize (no code is
-// ever issued, the loopback callback never fires). `CLAUDE_AI_ORIGIN` in the
-// SDK is still "https://claude.ai" — building the URL as
-// `${origin}/oauth/authorize` is the trap that produced the stale endpoint.
-// The real authorize URL is a distinct constant on the claude.com host.
+// The Claude OAuth client (9d1c250a) does NOT accept a `http://localhost:PORT/
+// callback` redirect — sending one is exactly what makes claude.ai reject the
+// request with "Invalid request format" the instant the user clicks Authorize.
+// The only redirect it accepts is the fixed `platform.claude.com/oauth/code/
+// callback`, which renders the authorization code as a `<code>#<state>` string
+// for the user to copy back into the app (the CLI's "Paste code here" step).
+// The prior loopback port (and the macOS `agent/src/oauth-flow.ts` it copied)
+// were a stale best-effort reimplementation, not the CLI's real flow.
 
-import { createServer, type Server, type IncomingMessage, type ServerResponse } from 'http'
 import { readFileSync, writeFileSync, mkdirSync } from 'fs'
 import { homedir } from 'os'
 import { join, dirname } from 'path'
 import { generateVerifier, challengeFromVerifier, generateState } from '../integrations/oauthPkce'
 
-// --- Constants (extracted from the bundled Claude Code CLI / SDK; see header) ---
+// --- Constants (captured from the bundled Claude Code CLI; see header) ---
 
 const CLIENT_ID = '9d1c250a-e61b-44d9-88ed-5944d1962f5e'
 const AUTHORIZE_URL = 'https://claude.com/cai/oauth/authorize'
 const AUTHORIZE_HOST = 'claude.com'
 const AUTHORIZE_PATH = '/cai/oauth/authorize'
 const TOKEN_URL = 'https://platform.claude.com/v1/oauth/token'
-const SUCCESS_URL = 'https://platform.claude.com/oauth/code/success?app=claude-code'
-// The exact claude.ai subscription scope set the real Claude Code CLI requests
-// (SDK constant `A5`, in order). `org:create_api_key` is the Console/API-key
-// flow scope and is correctly excluded — it throws "Unknown scope" for a
-// Max-subscription consent. A single `user:inference` is accepted for the
-// consent screen but rejected at code-issuance, so the full set is required.
+// The single fixed redirect the Claude client accepts. Not a loopback — the
+// authorization code is shown to the user on this page for copy/paste.
+const REDIRECT_URI = 'https://platform.claude.com/oauth/code/callback'
+// The exact scope set + order the real CLI requests, INCLUDING org:create_api_key
+// (the CLI sends it first). Serialized with `+` for spaces, matching the CLI.
 const SCOPES =
-  'user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload'
-// Beta gate the platform.claude.com token endpoint expects (SDK sends this on
-// every /v1/oauth/token call, including token refresh).
+  'org:create_api_key user:profile user:inference user:sessions:claude_code user:mcp_servers user:file_upload'
+// Beta gate the platform.claude.com token endpoint expects (the SDK sends this
+// on every /v1/oauth/token call, including token refresh).
 const OAUTH_BETA_HEADER = 'oauth-2025-04-20'
 const TOKEN_EXPIRY_SECONDS = 31536000 // 1 year
-const CALLBACK_TIMEOUT_MS = 2 * 60 * 1000
 
 // --- Credential file location + shape ---
 
@@ -167,21 +163,19 @@ export function removeClaudeCredentials(env: NodeJS.ProcessEnv = process.env): v
 
 // --- Authorization URL (build + validate) ---
 
-/** Build the Claude subscription authorize URL for a PKCE loopback attempt. */
-export function buildClaudeAuthUrl(params: {
-  redirectUri: string
-  challenge: string
-  state: string
-}): string {
+/**
+ * Build the Claude subscription authorize URL — the manual (copy-paste) flow the
+ * real CLI uses. `redirect_uri` is the fixed platform.claude.com callback (not a
+ * loopback); the user copies the resulting code back into the app.
+ */
+export function buildClaudeAuthUrl(params: { challenge: string; state: string }): string {
   const url = new URL(AUTHORIZE_URL)
-  // Do NOT set `code=true`. That flag selects the manual/headless copy-paste
-  // response format (redirect to platform.claude.com/oauth/code/callback where
-  // the user pastes `code#state` back). The loopback flow the CLI runs for a
-  // desktop with a browser omits it; sending it WITH a localhost redirect_uri
-  // makes the authorize request "Invalid request format".
+  // `code=true` selects the manual response format the client requires. (The
+  // client rejects a localhost redirect, so there is no loopback alternative.)
+  url.searchParams.set('code', 'true')
   url.searchParams.set('client_id', CLIENT_ID)
   url.searchParams.set('response_type', 'code')
-  url.searchParams.set('redirect_uri', params.redirectUri)
+  url.searchParams.set('redirect_uri', REDIRECT_URI)
   url.searchParams.set('scope', SCOPES)
   url.searchParams.set('code_challenge', params.challenge)
   url.searchParams.set('code_challenge_method', 'S256')
@@ -190,11 +184,11 @@ export function buildClaudeAuthUrl(params: {
 }
 
 /**
- * Validate a Claude OAuth authorize URL before opening it in the browser —
- * port of macOS ChatProvider.validatedClaudeOAuthURL. Returns the parsed URL
- * when it is exactly an https://claude.com/cai/oauth/authorize PKCE request with
- * a localhost loopback redirect, else null. Guards against opening an attacker-
- * substituted URL.
+ * Validate a Claude OAuth authorize URL before opening it in the browser.
+ * Returns the parsed URL when it is exactly our claude.com/cai PKCE request with
+ * the fixed platform.claude.com redirect, else null. Guards against opening an
+ * attacker-substituted URL (in particular, one that would send the code to a
+ * redirect we don't control).
  */
 export function validateClaudeOAuthUrl(urlString: string | null | undefined): URL | null {
   if (!urlString) return null
@@ -232,36 +226,60 @@ export function validateClaudeOAuthUrl(urlString: string | null | undefined): UR
   ) {
     return null
   }
-  const redirect = singleValue('redirect_uri')
-  if (!redirect) return null
-  let redirectUrl: URL
-  try {
-    redirectUrl = new URL(redirect)
-  } catch {
-    return null
-  }
-  if (
-    redirectUrl.protocol !== 'http:' ||
-    redirectUrl.hostname.toLowerCase() !== 'localhost' ||
-    redirectUrl.port === '' ||
-    redirectUrl.pathname !== '/callback'
-  ) {
-    return null
-  }
+  // The redirect must be exactly the fixed platform.claude.com callback — never
+  // open a request that could deliver the code anywhere else.
+  if (singleValue('redirect_uri') !== REDIRECT_URI) return null
   return url
 }
 
 /**
- * A fresh bridge/flow-issued authorize URL represents a new OAuth attempt (e.g.
- * after the bounded callback timeout), so the one-launch-per-attempt browser
- * latch may reset. Same URL = same in-flight flow = do not relaunch.
- * Port of macOS ChatProvider.isNewClaudeOAuthAttempt.
+ * A fresh flow-issued authorize URL represents a new OAuth attempt, so the
+ * one-launch-per-attempt browser latch may reset. Same URL = same in-flight flow
+ * = do not relaunch.
  */
 export function isNewClaudeOAuthAttempt(
   previousAuthUrl: string | null | undefined,
   nextAuthUrl: string | null | undefined
 ): boolean {
   return previousAuthUrl !== nextAuthUrl
+}
+
+// --- Pasted-code parsing ---
+
+export interface ParsedClaudeAuthCode {
+  code: string
+  /** State segment when present (`code#state`), else null. */
+  state: string | null
+}
+
+/**
+ * Parse what the user copied from the platform.claude.com callback page. Accepts
+ * the `code#state` string Anthropic renders, a bare code, or the full callback
+ * URL (if the user pastes the address bar). Returns null when no code is found.
+ */
+export function parseClaudeAuthCode(input: string | null | undefined): ParsedClaudeAuthCode | null {
+  if (!input) return null
+  const trimmed = input.trim()
+  if (!trimmed) return null
+  // Full callback URL pasted from the address bar: read the query params.
+  if (/^https?:\/\//i.test(trimmed)) {
+    try {
+      const u = new URL(trimmed)
+      const code = u.searchParams.get('code')
+      if (!code) return null
+      return { code, state: u.searchParams.get('state') }
+    } catch {
+      return null
+    }
+  }
+  // Otherwise it's the "code#state" string shown for manual entry.
+  const hashIdx = trimmed.indexOf('#')
+  if (hashIdx >= 0) {
+    const code = trimmed.slice(0, hashIdx).trim()
+    const state = trimmed.slice(hashIdx + 1).trim()
+    return code ? { code, state: state || null } : null
+  }
+  return { code: trimmed, state: null }
 }
 
 // --- Token exchange ---
@@ -284,15 +302,16 @@ interface RawTokenResponse {
 /**
  * Exchange an authorization code for tokens at the Claude token endpoint
  * (`platform.claude.com/v1/oauth/token`). Body + headers mirror the SDK's own
- * proven call to this endpoint: a JSON body carrying the PKCE `code_verifier`
- * and echoed `state`, plus the `anthropic-beta: oauth-2025-04-20` gate. Uses
- * global `fetch` so it can be tested against a local mock.
+ * proven call to this endpoint: a JSON body carrying the PKCE `code_verifier`,
+ * the fixed `redirect_uri`, and the echoed `state`, plus the
+ * `anthropic-beta: oauth-2025-04-20` gate. Uses global `fetch` so it can be
+ * tested against a local mock.
  */
 export async function exchangeClaudeCodeForToken(
   code: string,
   codeVerifier: string,
   state: string,
-  redirectUri: string,
+  redirectUri: string = REDIRECT_URI,
   tokenUrl: string = TOKEN_URL
 ): Promise<ClaudeOAuthResult> {
   const res = await fetch(tokenUrl, {
@@ -326,81 +345,28 @@ export async function exchangeClaudeCodeForToken(
   }
 }
 
-// --- Loopback flow ---
+// --- Manual flow ---
 
 export interface ClaudeOAuthFlowHandle {
   /** URL to validate + open in the browser. */
   authUrl: string
-  /** Resolves once the callback is received, code exchanged, and creds written. */
-  complete: Promise<ClaudeOAuthResult>
-  /** Cancel: close the callback server and reject `complete`. */
+  /**
+   * Complete the flow with what the user copied from the callback page. Parses
+   * the code (+ optional state), verifies state, exchanges it for tokens, and
+   * writes credentials. Rejects on a bad code, state mismatch, or exchange error.
+   */
+  submitCode: (pastedInput: string) => Promise<ClaudeOAuthResult>
+  /** Cancel: no-op teardown (no server to close). */
   cancel: () => void
 }
 
-function startCallbackServer(): Promise<{ server: Server; port: number }> {
-  return new Promise((resolve, reject) => {
-    const server = createServer()
-    server.once('error', reject)
-    // localhost (not 127.0.0.1) so the redirect_uri host matches the validator.
-    server.listen(0, 'localhost', () => {
-      const addr = server.address()
-      if (!addr || typeof addr === 'string') {
-        reject(new Error('Failed to get callback server address'))
-        return
-      }
-      resolve({ server, port: addr.port })
-    })
-  })
-}
-
-function waitForCallback(
-  server: Server,
-  expectedState: string,
-  logErr: (msg: string) => void
-): Promise<string> {
-  return new Promise((resolve, reject) => {
-    const timeout = setTimeout(() => {
-      reject(new Error('Claude sign-in timed out (2 minutes). Try again.'))
-      server.close()
-    }, CALLBACK_TIMEOUT_MS)
-
-    server.on('request', (req: IncomingMessage, res: ServerResponse) => {
-      const parsed = new URL(req.url || '', 'http://localhost')
-      if (parsed.pathname !== '/callback') {
-        res.writeHead(404)
-        res.end('Not Found')
-        return
-      }
-      const code = parsed.searchParams.get('code')
-      const state = parsed.searchParams.get('state')
-      if (!code) {
-        res.writeHead(400)
-        res.end('Authorization code not found')
-        clearTimeout(timeout)
-        reject(new Error('No authorization code received'))
-        return
-      }
-      if (state !== expectedState) {
-        res.writeHead(400)
-        res.end('Invalid state parameter')
-        clearTimeout(timeout)
-        reject(new Error('OAuth state mismatch'))
-        return
-      }
-      logErr('Claude OAuth callback received with valid code')
-      res.writeHead(302, { Location: SUCCESS_URL })
-      res.end()
-      clearTimeout(timeout)
-      resolve(code)
-    })
-  })
-}
-
 /**
- * Start the loopback OAuth flow. Returns the authorize URL for the caller to
- * validate + open, and a promise that resolves after the callback lands, the
- * code is exchanged, and credentials are written. The caller opens the browser
- * (mirrors macOS: the bridge builds the URL, the UI opens it).
+ * Start the manual OAuth flow. Returns the authorize URL for the caller to
+ * validate + open, plus `submitCode` to finish once the user pastes the code the
+ * browser shows. There is no callback server — the Claude client only supports
+ * the fixed platform.claude.com redirect, so the code comes back via copy/paste
+ * (or, in a future in-app browser, by intercepting that redirect and calling
+ * `submitCode` with the URL).
  */
 export async function startClaudeOAuthFlow(
   logErr: (msg: string) => void,
@@ -409,49 +375,37 @@ export async function startClaudeOAuthFlow(
   const codeVerifier = generateVerifier()
   const codeChallenge = challengeFromVerifier(codeVerifier)
   const state = generateState()
-
-  const { server, port } = await startCallbackServer()
-  logErr(`Claude OAuth callback server listening on port ${port}`)
-  const redirectUri = `http://localhost:${port}/callback`
-  const authUrl = buildClaudeAuthUrl({ redirectUri, challenge: codeChallenge, state })
-
-  let cancelled = false
-  let cancelReject: ((err: Error) => void) | null = null
-
-  const complete = new Promise<ClaudeOAuthResult>((resolve, reject) => {
-    cancelReject = reject
-    waitForCallback(server, state, logErr)
-      .then(async (code) => {
-        if (cancelled) return
-        logErr('Exchanging Claude authorization code for tokens...')
-        const tokens = await exchangeClaudeCodeForToken(code, codeVerifier, state, redirectUri)
-        writeClaudeCredentials(
-          {
-            accessToken: tokens.accessToken,
-            refreshToken: tokens.refreshToken ?? null,
-            expiresAt: tokens.expiresAt,
-            scopes: tokens.scopes
-          },
-          env
-        )
-        logErr('Claude credentials written')
-        resolve(tokens)
-      })
-      .catch((err) => {
-        if (!cancelled) reject(err)
-      })
-      .finally(() => {
-        server.close()
-      })
-  })
+  const authUrl = buildClaudeAuthUrl({ challenge: codeChallenge, state })
+  let done = false
 
   return {
     authUrl,
-    complete,
+    submitCode: async (pastedInput: string): Promise<ClaudeOAuthResult> => {
+      if (done) throw new Error('Claude sign-in already completed')
+      const parsed = parseClaudeAuthCode(pastedInput)
+      if (!parsed) {
+        throw new Error('Could not read the code. Copy the full code shown after you approve.')
+      }
+      if (parsed.state && parsed.state !== state) {
+        throw new Error('OAuth state mismatch')
+      }
+      logErr('Exchanging pasted Claude authorization code for tokens...')
+      const tokens = await exchangeClaudeCodeForToken(parsed.code, codeVerifier, state)
+      writeClaudeCredentials(
+        {
+          accessToken: tokens.accessToken,
+          refreshToken: tokens.refreshToken ?? null,
+          expiresAt: tokens.expiresAt,
+          scopes: tokens.scopes
+        },
+        env
+      )
+      done = true
+      logErr('Claude credentials written')
+      return tokens
+    },
     cancel: () => {
-      cancelled = true
-      server.close()
-      cancelReject?.(new Error('Claude sign-in cancelled'))
+      done = true
     }
   }
 }

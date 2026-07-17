@@ -26,7 +26,8 @@ import type {
   CodingAgentInfo,
   CodingAgentResult,
   CodingAgentRunArgs,
-  CodingAgentStartAuthResult
+  CodingAgentStartAuthResult,
+  CodingAgentSubmitAuthResult
 } from '../../shared/types'
 
 function broadcast(event: CodingAgentEvent): void {
@@ -72,53 +73,87 @@ export function registerCodingAgentHandlers(): void {
 
   ipcMain.handle('codingAgent:authStatus', (): CodingAgentAuthStatus => claudeAuthStatus())
 
-  ipcMain.handle('codingAgent:startAuth', (): Promise<CodingAgentStartAuthResult> => startClaudeAuth())
+  ipcMain.handle(
+    'codingAgent:startAuth',
+    (): Promise<CodingAgentStartAuthResult> => startClaudeAuth()
+  )
+
+  ipcMain.handle(
+    'codingAgent:submitAuthCode',
+    (_e, code: string): Promise<CodingAgentSubmitAuthResult> => submitClaudeAuthCode(code)
+  )
 
   ipcMain.handle('codingAgent:signOut', (): CodingAgentAuthStatus => {
+    pendingClaudeAuth?.cancel()
+    pendingClaudeAuth = null
     removeClaudeCredentials()
     return claudeAuthStatus()
   })
 }
 
-// One in-flight Claude sign-in at a time. A duplicate request (e.g. the user
-// double-clicks "Sign in") joins the running flow instead of opening a second
-// browser tab or spinning up a second callback server — mirrors macOS's
-// idempotent startAuthFlow / one-launch latch.
-let activeAuth: Promise<CodingAgentStartAuthResult> | null = null
+// The manual Claude sign-in is two steps: `startAuth` opens the browser and
+// stores the in-flight flow; `submitAuthCode` completes it with the code the
+// user copied from the Claude callback page. (The client only supports the
+// fixed platform.claude.com redirect, so there is no localhost callback to
+// await — see claudeOAuth.ts.)
+let pendingClaudeAuth: ClaudeOAuthFlowHandle | null = null
+// One start at a time: a duplicate `startAuth` (double-click) joins the running
+// start instead of opening a second browser tab.
+let activeStart: Promise<CodingAgentStartAuthResult> | null = null
 
 async function startClaudeAuth(): Promise<CodingAgentStartAuthResult> {
-  if (activeAuth) return activeAuth
-  activeAuth = runClaudeAuthOnce().finally(() => {
-    activeAuth = null
+  if (activeStart) return activeStart
+  activeStart = runClaudeAuthStart().finally(() => {
+    activeStart = null
   })
-  return activeAuth
+  return activeStart
 }
 
-async function runClaudeAuthOnce(): Promise<CodingAgentStartAuthResult> {
+async function runClaudeAuthStart(): Promise<CodingAgentStartAuthResult> {
   const log = (message: string): void => console.log(`[codingAgent] ${message}`)
-  let flow: ClaudeOAuthFlowHandle | null = null
   try {
-    flow = await startClaudeOAuthFlow(log)
-    // Validate before opening: never hand the browser a URL that isn't the
-    // exact claude.ai PKCE loopback authorize request we built.
+    const flow = await startClaudeOAuthFlow(log)
+    // Validate before opening: never hand the browser a URL that isn't the exact
+    // claude.com/cai PKCE request we built (and never one whose redirect could
+    // deliver the code somewhere we don't control).
     const validated = validateClaudeOAuthUrl(flow.authUrl)
     if (!validated) {
       flow.cancel()
-      // Fail-closed (macOS parity): don't hand the browser a URL that isn't the
-      // exact claude.ai PKCE loopback request; surface the same generic copy.
       return {
         ok: false,
         error: 'Unable to start Claude sign-in. Try again.',
         status: claudeAuthStatus()
       }
     }
-    // Don't spawn a real browser under E2E (keeps the harness hermetic and lets
-    // it screenshot the upsell sheet without a claude.ai tab opening).
+    // Supersede any previous in-flight attempt, then open the browser. Under E2E
+    // we skip the real browser (keeps the harness hermetic) but still arm the
+    // pending flow so the paste step can be exercised.
+    pendingClaudeAuth?.cancel()
+    pendingClaudeAuth = flow
     if (!process.env.OMI_E2E) void shell.openExternal(validated.toString())
-    await flow.complete
+    return { ok: true, awaitingCode: true, status: claudeAuthStatus() }
+  } catch (error) {
+    pendingClaudeAuth = null
+    return { ok: false, error: messageFrom(error), status: claudeAuthStatus() }
+  }
+}
+
+async function submitClaudeAuthCode(code: string): Promise<CodingAgentSubmitAuthResult> {
+  const flow = pendingClaudeAuth
+  if (!flow) {
+    return {
+      ok: false,
+      error: 'Start Claude sign-in first, then paste the code.',
+      status: claudeAuthStatus()
+    }
+  }
+  try {
+    await flow.submitCode(code)
+    pendingClaudeAuth = null
     return { ok: true, status: claudeAuthStatus() }
   } catch (error) {
-    flow?.cancel()
+    // Keep the pending flow armed so a mistyped/partial paste can be retried
+    // without reopening the browser.
     return { ok: false, error: messageFrom(error), status: claudeAuthStatus() }
   }
 }
