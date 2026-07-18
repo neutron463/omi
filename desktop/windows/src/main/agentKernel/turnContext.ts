@@ -309,7 +309,7 @@ function peekCompletionDelta(input: AssembleTurnContextInput): CompletionDeltaPe
   ]
   for (const item of items) {
     promptLines.push(
-      `- title=${item.title}; status=${item.status}; surface=${item.surfaceKind ?? 'unknown'}; agentRef=${item.runId ?? item.sessionId ?? item.id}`
+      `- title=${item.title}; status=${item.status}; surface=${item.surfaceKind ?? 'unknown'}; runId=${item.runId ?? item.sessionId ?? item.id}`
     )
     promptLines.push(`  finalOutput=${item.finalText}`)
   }

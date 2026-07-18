@@ -1430,34 +1430,25 @@ export const swiftToolManifest: OmiToolManifestEntry[] = finalizeManifestEntries
   swiftToolSurfacePatches
 )
 
+// Voice patches for the control tools. These carry ONLY the spoken-guidance
+// `realtimeDescription`; they intentionally DO NOT override the parameter schema.
+// The shared `inputSchema` (agentControlInputSchema) already matches exactly what
+// each tool's strict Zod executor (controlTools.ts) accepts — the same concrete-id
+// field names (runId / artifactId / parentRunId), the same required set. A voice
+// `schemaOverride` that renamed those to opaque handles (agentRef / artifactRef),
+// snake_cased them (parent_run_id), or relaxed `required` only made the warm voice
+// session advertise a contract the executor REJECTS: strict Zod refuses the phantom
+// key (unrecognized_keys) and still requires the real id, so a spoken control request
+// failed with invalid_tool_input while the model narrated success. buildVoiceHubTool-
+// Catalog falls back to `inputSchema` when a patch omits `schemaOverride`, which is
+// exactly what we want here. list_agent_sessions keeps a schemaOverride only because
+// it is a strict SUBSET of the accepted keys (no phantom key, no relaxed required) —
+// a narrower-but-fully-accepted contract. The advertised-param-contract guard
+// (toolInstructionCoverage.ts) mechanically enforces this for every advertised tool.
 const controlVoicePatches: Partial<Record<AgentControlManifestTool['name'], OmiToolVoiceConfig>> = {
   spawn_agent: {
     realtimeDescription:
-      "Start canonical Omi background work. Visible runs appear as floating-bar pills. Use for multi-step work in the user's apps/browser/files that you cannot do directly.",
-    schemaOverride: schema(
-      {
-        objective: { type: 'string', description: 'Self-contained background-agent objective.' },
-        provider: {
-          type: 'string',
-          enum: ['openclaw', 'hermes'],
-          description: 'Optional local provider override.'
-        },
-        parent_run_id: {
-          type: 'string',
-          description: 'Optional parent run to link via delegation.'
-        },
-        visible: {
-          type: 'boolean',
-          description: 'Whether to project into floating-bar pill UI. Default true.'
-        },
-        title: { type: 'string', description: 'Optional visible session title.' },
-        brief: {
-          type: 'string',
-          description: 'Optional short user-visible summary for the floating pill.'
-        }
-      },
-      ['objective']
-    )
+      "Start canonical Omi background work. Visible runs appear as floating-bar pills. Use for multi-step work in the user's apps/browser/files that you cannot do directly."
   },
   list_agent_sessions: {
     realtimeDescription:
@@ -1489,83 +1480,19 @@ const controlVoicePatches: Partial<Record<AgentControlManifestTool['name'], OmiT
   },
   get_agent_run: {
     realtimeDescription:
-      'Inspect one canonical Omi-managed agent run. Prefer an agentRef from list_agent_sessions.',
-    schemaOverride: schema(
-      {
-        agentRef: { type: 'string', description: 'Opaque agent handle from list_agent_sessions.' },
-        runId: { type: 'string', description: 'Canonical Omi run id.' },
-        includeEvents: {
-          type: 'boolean',
-          description: 'Include ordered kernel events. Default true.'
-        },
-        eventLimit: { type: 'number', description: 'Maximum events to return. Default 100.' }
-      },
-      []
-    )
+      'Inspect one canonical Omi-managed agent run. Pass the runId from list_agent_sessions.'
   },
   cancel_agent_run: {
     realtimeDescription:
-      'Request cancellation for one canonical Omi-managed agent run. Use when the user asks to stop or kill a running canonical agent/subagent.',
-    schemaOverride: schema(
-      {
-        agentRef: { type: 'string', description: 'Opaque agent handle from list_agent_sessions.' },
-        runId: { type: 'string', description: 'Canonical Omi run id to cancel.' }
-      },
-      []
-    )
+      'Request cancellation for one canonical Omi-managed agent run. Use when the user asks to stop or kill a running canonical agent/subagent.'
   },
   inspect_agent_artifacts: {
     realtimeDescription:
-      'Inspect metadata and references for canonical Omi-managed agent artifacts. Does not read arbitrary artifact contents.',
-    schemaOverride: schema(
-      {
-        agentRef: { type: 'string', description: 'Opaque agent handle from list_agent_sessions.' },
-        artifactRef: {
-          type: 'string',
-          description: 'Opaque artifact handle from inspect_agent_artifacts.'
-        },
-        artifactId: { type: 'string', description: 'Canonical Omi artifact id.' },
-        sessionId: { type: 'string', description: 'Canonical Omi session id.' },
-        runId: { type: 'string', description: 'Canonical Omi run id.' },
-        attemptId: { type: 'string', description: 'Canonical Omi attempt id.' },
-        role: {
-          type: 'string',
-          enum: ['input', 'result', 'checkpoint', 'tool_output', 'log', 'other'],
-          description: 'Optional artifact role filter.'
-        },
-        limit: { type: 'number', description: 'Maximum artifacts to return. Default 50.' }
-      },
-      []
-    )
+      'Inspect metadata and references for canonical Omi-managed agent artifacts. Does not read arbitrary artifact contents.'
   },
   update_agent_artifact_lifecycle: {
     realtimeDescription:
-      'Update metadata-only lifecycle state for one canonical Omi-managed agent artifact. Does not open, delete, retain, or read files.',
-    schemaOverride: schema(
-      {
-        artifactRef: {
-          type: 'string',
-          description: 'Opaque artifact handle from inspect_agent_artifacts.'
-        },
-        artifactId: { type: 'string', description: 'Canonical Omi artifact id.' },
-        state: {
-          type: 'string',
-          enum: ['retained', 'dismissed', 'opened'],
-          description: 'Target metadata lifecycle state.'
-        },
-        sessionId: {
-          type: 'string',
-          description: 'Optional canonical Omi session id scope guard.'
-        },
-        runId: { type: 'string', description: 'Optional canonical Omi run id scope guard.' },
-        attemptId: {
-          type: 'string',
-          description: 'Optional canonical Omi attempt id scope guard.'
-        },
-        reason: { type: 'string', description: 'Optional short reason.' }
-      },
-      ['state']
-    )
+      'Update metadata-only lifecycle state for one canonical Omi-managed agent artifact. Does not open, delete, retain, or read files.'
   }
 }
 

@@ -120,11 +120,18 @@ describe('buildVoiceHubToolCatalog — host-derived, role-gated (INV-AGENT)', ()
     }
   })
 
-  it('uses the voice realtimeDescription + schemaOverride when present', () => {
+  it('uses the voice realtimeDescription and falls back to the shared inputSchema for params', () => {
     const spawn = buildVoiceHubToolCatalog('coordinator').find((t) => t.name === 'spawn_agent')!
+    // The spoken guidance comes from the voice patch's realtimeDescription …
     expect(spawn.description).toMatch(/background/i)
-    // The voice schemaOverride requires `objective`.
-    expect((spawn.parameters as { required?: string[] }).required).toContain('objective')
+    // … but its params come from the shared inputSchema (the voice patch carries no
+    // schemaOverride, so the advertised contract matches the strict executor). It
+    // still requires `objective` and uses the executor's `parentRunId` (never the
+    // old snake_case `parent_run_id`).
+    const schema = spawn.parameters as { properties?: Record<string, unknown>; required?: string[] }
+    expect(schema.required).toContain('objective')
+    expect(Object.keys(schema.properties ?? {})).toContain('parentRunId')
+    expect(Object.keys(schema.properties ?? {})).not.toContain('parent_run_id')
   })
 })
 
