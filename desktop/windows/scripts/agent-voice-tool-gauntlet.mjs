@@ -59,6 +59,7 @@ import os from 'node:os'
 import path from 'node:path'
 import { fileURLToPath } from 'node:url'
 import { readDotEnv, decodeJwt, exchangeRefreshToken } from './lib/omi-auth.mjs'
+import { computeCleanupDeletions } from './lib/voice-gauntlet-cleanup.mjs'
 
 const root = path.resolve(path.dirname(fileURLToPath(import.meta.url)), '..')
 const SR = 16000,
@@ -559,10 +560,21 @@ async function main() {
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'omi-gauntlet-'))
   const ud = fs.mkdtempSync(path.join(os.tmpdir(), 'omi-gauntlet-ud-'))
   const rows = selected()
+  // The most items this run could possibly create — the HARD CAP on how many items
+  // cleanup may delete. A candidate set larger than this always means cleanup
+  // mis-classified real data, so it aborts (see computeCleanupDeletions).
+  const plannedCreateCount = rows.filter(
+    (t) => t.category === 'mutation' && /^create/i.test(t.id)
+  ).length
   const results = []
   let exit = 0
   let app = null
-  const createdItemIds = new Set()
+  // tokenMatchedIds: ids positively matched to one of the run's test tokens — the
+  // SAFE cleanup channel (can only ever name data this run authored).
+  // observedCreatedIds: ids seen appearing during a create turn — the guarded id-diff
+  // channel (only trusted when the baseline fetch succeeded).
+  const tokenMatchedIds = new Set()
+  const observedCreatedIds = new Set()
   const spawnedAgents = new Set()
 
   try {
@@ -636,10 +648,25 @@ async function main() {
     }
     log('mic/hub warm-up done')
 
-    let itemsBefore = restBase ? await restActionItems(restBase, idToken).catch(() => []) : []
-    // Snapshot the pre-run item ids: cleanup deletes ANY item that appears during the
-    // run (id not here), which is robust even when STT mangles a token (e.g. quokka →
-    // "quaka") so a created task can never leak onto the account.
+    // Capture the pre-run baseline EXPLICITLY distinguishing "fetch failed" from
+    // "fetched, genuinely empty". A `.catch(() => [])` conflates the two, and an
+    // empty baseline is exactly what let a transient fetch failure classify every
+    // real task as "run-created" and mass-delete it. When the baseline fetch fails,
+    // id-diff cleanup is DISABLED for the whole run (mirrors taskSyncEngine.ts:299 —
+    // "an empty or failed listing never wipes local data").
+    let itemsBefore = []
+    let baselineOk = false
+    if (restBase) {
+      try {
+        itemsBefore = await restActionItems(restBase, idToken)
+        baselineOk = true
+      } catch (e) {
+        log(
+          `WARN: baseline action-items fetch FAILED (${e.message}) — id-diff cleanup DISABLED this run; only positive token-matched items will be cleaned up`
+        )
+      }
+    }
+    // Trusted only when baselineOk — the guarded id-diff never uses this otherwise.
     const initialItemIds = new Set(itemsBefore.map((i) => i.id))
     let agentsBefore = agentSessionIds(await callVoiceTool(page, 'list_agent_sessions', {}))
 
@@ -799,9 +826,19 @@ async function main() {
           }
         }
         const re = t.re || MUTATION_RE
+        // SAFE cleanup channel: any current item matching a run test token was
+        // authored by this run — record its id for positive-match cleanup.
         after
           .filter((i) => MUTATION_RE.test(i.description))
-          .forEach((i) => createdItemIds.add(i.id))
+          .forEach((i) => tokenMatchedIds.add(i.id))
+        // Guarded diff signal: ONLY when the baseline is trusted, record ids that
+        // APPEARED this turn (in `after` but not `before`). Catches an STT-mangled
+        // token without ever trusting a bare "not in baseline" test. A failed
+        // baseline (before === []) never populates this — the diff stays disabled.
+        if (baselineOk) {
+          const beforeIds = new Set(before.map((i) => i.id))
+          for (const i of after) if (i.id && !beforeIds.has(i.id)) observedCreatedIds.add(i.id)
+        }
         const fired = tools.includes(t.expect) || (t.alt || []).some((a) => tools.includes(a))
         // Explicit backend evidence: the actual item text + completed flag BEFORE/AFTER
         // the spoken mutation — the empirical proof of whether the write took (e.g. it
@@ -879,31 +916,66 @@ async function main() {
       await new Promise((r) => setTimeout(r, 1500))
     }
 
-    // ── Cleanup: delete EVERY item that appeared during the run (id not in the initial
-    //    snapshot) plus anything matching our test tokens; re-verify none remain. The
-    //    id-diff makes cleanup robust to STT-mangled tokens (a leaked task can't hide). ──
+    // ── Cleanup: delete ONLY items this run authored, decided by the guarded pure
+    //    function (positive token match primary; guarded id-diff secondary; hard cap).
+    //    A failed/empty listing or a suspicious bulk delete aborts and deletes NOTHING
+    //    (mirrors taskSyncEngine.ts:299 — an empty/failed listing never wipes data). ──
     if (restBase) {
-      const after = await restActionItems(restBase, idToken).catch(() => [])
-      for (const it of after) {
-        if (it.id && (!initialItemIds.has(it.id) || MUTATION_RE.test(it.description)))
-          createdItemIds.add(it.id)
+      // Fetch the CURRENT items with explicit success/failure — a failed listing
+      // disables cleanup entirely rather than silently becoming an empty diff.
+      let afterItems = []
+      let afterOk = false
+      try {
+        afterItems = await restActionItems(restBase, idToken)
+        afterOk = true
+      } catch (e) {
+        log(`WARN: cleanup listing FAILED (${e.message}) — skipping cleanup (deleting nothing)`)
       }
+      const decision = computeCleanupDeletions({
+        baselineOk,
+        initialItemIds,
+        observedCreatedIds,
+        tokenMatchedIds,
+        tokenRe: MUTATION_RE,
+        afterItems,
+        afterOk,
+        plannedCreateCount
+      })
       let del = 0
-      for (const id of createdItemIds) {
-        if (id && (await restDelete(restBase, idToken, id))) del++
+      if (decision.aborted) {
+        log(`cleanup ABORTED (deleting nothing): ${decision.reason}`)
+      } else {
+        for (const id of decision.ids) {
+          if (id && (await restDelete(restBase, idToken, id))) del++
+        }
       }
-      const final = await restActionItems(restBase, idToken).catch(() => [])
-      const remaining = final.filter(
-        (i) => !initialItemIds.has(i.id) || MUTATION_RE.test(i.description)
-      ).length
-      log(`cleanup: deleted ${del} run-created item(s); new-since-start remaining=${remaining}`)
+      // Re-verify only our OWN tokens are gone. "not in baseline" is deliberately NOT
+      // a dirtiness signal anymore — that heuristic was the mass-delete bug.
+      let remaining = null
+      try {
+        const final = await restActionItems(restBase, idToken)
+        remaining = final.filter((i) => MUTATION_RE.test(i.description || '')).length
+      } catch {
+        remaining = null // unverifiable read — don't fail the run on it
+      }
+      log(
+        `cleanup: deleted ${del} item(s)${decision.aborted ? ' (ABORTED)' : ''}; token-matched remaining=${remaining ?? 'unknown'}`
+      )
       results.push({
         id: '__cleanup__',
         category: 'cleanup',
-        verdict: remaining === 0 ? 'CLEAN' : 'DIRTY',
-        detail: `deleted ${del}, remaining ${remaining}`
+        verdict: decision.aborted
+          ? 'ABORTED'
+          : remaining === 0
+            ? 'CLEAN'
+            : remaining === null
+              ? 'UNVERIFIED'
+              : 'DIRTY',
+        detail: decision.aborted
+          ? `deleted 0 — ${decision.reason}`
+          : `deleted ${del}, token-matched remaining ${remaining ?? 'unknown'}`
       })
-      if (remaining !== 0) exit = 1
+      if (remaining) exit = 1
     }
     // The delegation build tells the coding agent to write a file; it lands in the app
     // cwd (the worktree). Remove any tic-tac-toe artifact so it can't get committed.
