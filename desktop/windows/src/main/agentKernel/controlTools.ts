@@ -342,6 +342,35 @@ export const AGENT_CONTROL_TOOL_NAMES = agentControlCapabilityManifest.map(
   (tool) => tool.name
 ) as AgentControlToolName[]
 
+/**
+ * The executor's ACCEPTED input-key contract for one control tool, read straight
+ * from its Zod schema — the exact keys `.parse()` accepts and which of them are
+ * required. Every control schema is built `.strict()` (via `strictObject` /
+ * `z.strictObject`), so any key NOT in `accepted` is REJECTED at dispatch
+ * (`unrecognized_keys`); hence `strict: true` here is a fact about the schema, not a
+ * guess. Used by the advertised-param-contract guard (toolInstructionCoverage) to
+ * prove that no model surface — voice especially — advertises a key this executor
+ * would reject, or a required key it does not read (the update_action_item /
+ * agentRef bug class). Zod v4 exposes `.shape` on a plain `.strict()` object AND on
+ * the one `.refine()`-wrapped schema (inspect_agent_artifacts), so no unwrapping is
+ * needed. A field is "required" when it is not `.optional()` and has no `.default()`
+ * — `.isOptional()` captures both.
+ */
+export function controlToolExecutorParamContract(name: AgentControlToolName): {
+  accepted: string[]
+  required: string[]
+  strict: true
+} {
+  const shape = (
+    agentControlToolSchemas[name] as unknown as {
+      shape: Record<string, { isOptional: () => boolean }>
+    }
+  ).shape
+  const accepted = Object.keys(shape)
+  const required = accepted.filter((key) => !shape[key].isOptional())
+  return { accepted, required, strict: true }
+}
+
 const CONTROL_TOOL_NAME_SET = new Set<string>(Object.keys(agentControlToolSchemas))
 
 /**

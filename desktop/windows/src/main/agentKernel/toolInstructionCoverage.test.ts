@@ -23,6 +23,7 @@
 
 import { describe, expect, it } from 'vitest'
 import {
+  analyzeAdvertisedParamContract,
   analyzeAdvertisedToolCopy,
   analyzeSurfaceCoverage,
   analyzeToolInstructionCoverage,
@@ -30,9 +31,12 @@ import {
   instructionMentions,
   type AdvertisedToolCopy,
   type CoverageReport,
+  type ExecutorParamContract,
+  type ParamContractCoverageInput,
   type SurfaceCoverageInput
 } from './toolInstructionCoverage'
 import { omiToolManifest, toolsForAdapter } from './omiToolManifest'
+import { controlToolExecutorParamContract, isAgentControlToolName } from './controlTools'
 import { buildVoiceHubToolCatalog } from '../ipc/voiceTool'
 import { buildVoiceSystemInstruction } from '../../renderer/src/lib/voice/systemInstruction'
 
@@ -350,6 +354,205 @@ describe('analyzeAdvertisedToolCopy — advertised-tool copy reverse check', () 
       knownToolNames: ['get_tasks', 'get_action_items']
     })
     expect(r.fails).toBe(false)
+  })
+})
+
+// ── Advertised PARAM CONTRACT vs executor accepted-key contract ────────────────
+// The THIRD analyzer's real-surface binding. For every voice-advertised tool, the
+// param names + required set it advertises (from the production catalog) must be a
+// contract the executor accepts. Control-tool executor contracts are read from their
+// strict Zod schema (controlToolExecutorParamContract); product-tool executors are
+// non-strict and read a fixed key set, hand-kept here next to what the executors read.
+
+/** The input keys each serviceable PRODUCT-tool executor actually reads
+ *  (`stringArg(input,'…')` / `input.X` / `intArg(input.X)`). Non-strict: extra
+ *  advertised keys are ignored by the executor, so only the advertised-REQUIRED-key
+ *  check bites. Kept in sync with productToolExecutors.ts + captureScreenExecutor.ts —
+ *  a new voice-advertised product tool missing here fails the real-surface guard below
+ *  ("no executor contract mapped"), the intended forcing function. */
+const PRODUCT_TOOL_ACCEPTED_KEYS: Record<string, readonly string[]> = {
+  capture_screen: [], // ignores input entirely
+  semantic_search: ['query', 'days', 'app_filter', 'limit'],
+  search_tasks: ['query', 'include_completed'],
+  get_action_items: [
+    'completed',
+    'limit',
+    'offset',
+    'start_date',
+    'end_date',
+    'due_start_date',
+    'due_end_date'
+  ],
+  create_action_item: ['description', 'due_at', 'conversation_id'],
+  update_action_item: ['action_item_id', 'due_at', 'description', 'completed'],
+  complete_task: ['task_id'],
+  delete_task: ['task_id'],
+  execute_sql: ['query'],
+  get_memories: ['start_date', 'end_date', 'limit', 'offset'],
+  search_memories: ['query', 'limit'],
+  get_conversations: ['start_date', 'end_date', 'limit', 'offset', 'include_transcript'],
+  search_conversations: ['query', 'start_date', 'end_date', 'limit', 'include_transcript'],
+  get_work_context: ['minutes'],
+  get_daily_recap: ['days_ago'],
+  save_knowledge_graph: ['nodes', 'edges']
+}
+
+/** The executor accepted-key contract for one voice tool: control tools from their
+ *  strict Zod schema, product tools from the hand map above. `undefined` (no mapping)
+ *  is surfaced by the analyzer as an `unmapped` failure. */
+function executorContractFor(name: string): ExecutorParamContract | undefined {
+  if (isAgentControlToolName(name)) {
+    return { accepted: controlToolExecutorParamContract(name).accepted, strict: true }
+  }
+  const accepted = PRODUCT_TOOL_ACCEPTED_KEYS[name]
+  return accepted ? { accepted, strict: false } : undefined
+}
+
+/** Each advertised param name + required key set the model actually reads, straight
+ *  from the production voice catalog declaration. */
+function advertisedParamSchema(parameters: unknown): { params: string[]; required: string[] } {
+  const schema = parameters as { properties?: Record<string, unknown>; required?: string[] } | null
+  return {
+    params: Object.keys(schema?.properties ?? {}),
+    required: schema?.required ?? []
+  }
+}
+
+function voiceParamContractInput(): ParamContractCoverageInput {
+  const advertised = buildVoiceHubToolCatalog('coordinator').map((tool) => ({
+    name: tool.name,
+    ...advertisedParamSchema(tool.parameters)
+  }))
+  const executorsByTool: Record<string, ExecutorParamContract> = {}
+  for (const tool of advertised) {
+    const contract = executorContractFor(tool.name)
+    if (contract) executorsByTool[tool.name] = contract
+  }
+  return { surface: 'realtime_voice', advertised, executorsByTool }
+}
+
+describe('analyzeAdvertisedParamContract — rule encoding (synthetic fixtures)', () => {
+  it('strict executor + advertised phantom key → fails (the 5 control-tool bug)', () => {
+    const r = analyzeAdvertisedParamContract({
+      surface: 'realtime_voice',
+      advertised: [{ name: 'get_agent_run', params: ['agentRef', 'runId'], required: [] }],
+      executorsByTool: { get_agent_run: { accepted: ['runId', 'ownerId'], strict: true } }
+    })
+    expect(r.fails).toBe(true)
+    expect(r.offenders).toEqual([
+      {
+        tool: 'get_agent_run',
+        requiredNotAccepted: [],
+        advertisedNotAccepted: ['agentRef'],
+        unmapped: false
+      }
+    ])
+  })
+
+  it('advertised REQUIRED key the executor never reads → fails (the update_action_item bug)', () => {
+    const r = analyzeAdvertisedParamContract({
+      surface: 'realtime_voice',
+      advertised: [{ name: 'update_action_item', params: ['id', 'description'], required: ['id'] }],
+      executorsByTool: {
+        update_action_item: { accepted: ['action_item_id', 'description'], strict: false }
+      }
+    })
+    expect(r.fails).toBe(true)
+    expect(r.offenders[0]).toMatchObject({
+      tool: 'update_action_item',
+      requiredNotAccepted: ['id']
+    })
+  })
+
+  it('non-strict executor silently ignores extra optional advertised keys → ok', () => {
+    const r = analyzeAdvertisedParamContract({
+      surface: 'realtime_voice',
+      advertised: [
+        { name: 'semantic_search', params: ['query', 'days', 'unused_hint'], required: ['query'] }
+      ],
+      executorsByTool: {
+        semantic_search: { accepted: ['query', 'days', 'app_filter', 'limit'], strict: false }
+      }
+    })
+    expect(r.fails).toBe(false)
+    expect(r.offenders).toEqual([])
+  })
+
+  it('advertised tool with no executor contract → fails as unmapped', () => {
+    const r = analyzeAdvertisedParamContract({
+      surface: 'realtime_voice',
+      advertised: [{ name: 'brand_new_tool', params: [], required: [] }],
+      executorsByTool: {}
+    })
+    expect(r.fails).toBe(true)
+    expect(r.offenders[0]).toMatchObject({ tool: 'brand_new_tool', unmapped: true })
+  })
+
+  it('advertised contract fully within the strict accepted set → ok', () => {
+    const r = analyzeAdvertisedParamContract({
+      surface: 'realtime_voice',
+      advertised: [
+        {
+          name: 'get_agent_run',
+          params: ['runId', 'ownerId', 'includeEvents'],
+          required: ['runId']
+        }
+      ],
+      executorsByTool: {
+        get_agent_run: {
+          accepted: ['runId', 'ownerId', 'includeEvents', 'eventLimit'],
+          strict: true
+        }
+      }
+    })
+    expect(r.fails).toBe(false)
+  })
+})
+
+describe('advertised param contract — real voice surface (regression guard)', () => {
+  it('every voice-advertised tool has a known executor contract (map completeness)', () => {
+    const input = voiceParamContractInput()
+    const unmapped = input.advertised
+      .map((tool) => tool.name)
+      .filter((name) => !(name in input.executorsByTool))
+    expect(unmapped).toEqual([])
+  })
+
+  it('no voice-advertised tool advertises a param contract its executor rejects', () => {
+    // On a red run the message names the offender(s) and why. This is the mechanical
+    // catch for the 5 control-tool schema bugs AND the update_action_item bug.
+    const result = analyzeAdvertisedParamContract(voiceParamContractInput())
+    console.log(result.message)
+    expect(result.offenders).toEqual([])
+    expect(result.fails).toBe(false)
+  })
+
+  it('the 5 fixed control tools each advertise a contract ⊆ the executor-accepted set', () => {
+    const advertised = new Map(
+      buildVoiceHubToolCatalog('coordinator').map((tool) => [tool.name, tool.parameters] as const)
+    )
+    for (const name of [
+      'get_agent_run',
+      'cancel_agent_run',
+      'update_agent_artifact_lifecycle',
+      'inspect_agent_artifacts',
+      'spawn_agent'
+    ] as const) {
+      const parameters = advertised.get(name)
+      expect(parameters, `${name} must be voice-advertised`).toBeDefined()
+      const { params, required } = advertisedParamSchema(parameters)
+      const accepted = new Set(controlToolExecutorParamContract(name).accepted)
+      // No phantom key (the strict executor would reject it) …
+      expect(
+        params.filter((k) => !accepted.has(k)),
+        `${name} advertises unaccepted keys`
+      ).toEqual([])
+      // … and no advertised-required key the executor cannot accept.
+      expect(
+        required.filter((k) => !accepted.has(k)),
+        `${name} requires unaccepted keys`
+      ).toEqual([])
+    }
   })
 })
 

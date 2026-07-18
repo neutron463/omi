@@ -281,6 +281,125 @@ export function analyzeAdvertisedToolCopy(input: ToolCopyCoverageInput): ToolCop
   }
 }
 
+// ── Third surface of the SAME bug class: advertised PARAM CONTRACT vs executor ──
+// The two checks above police the model-facing PROSE (a system prompt or a tool's
+// own copy naming an uncallable tool). This one polices the model-facing SCHEMA: the
+// param names + required set a tool advertises must be a contract its executor
+// actually accepts. The voice manifest shipped this bug repeatedly — a `schemaOverride`
+// advertised `agentRef` / `artifactRef` / `parent_run_id` (keys the strict Zod control
+// executor rejects) or `id` where the executor reads `action_item_id` — so a spoken
+// request failed with invalid_tool_input while the model narrated success. Pure: the
+// caller derives each advertised tool's contract from the real catalog and each
+// executor's accepted-key contract from the real Zod schema (control) or a hand-kept
+// read-key map (product), and injects them here.
+
+/** One advertised tool's PARAM CONTRACT: the param names it advertises to the model
+ *  and which of them it marks required — read straight from the advertised catalog
+ *  declaration (schema.properties keys + schema.required), so it never drifts from
+ *  what the model sees. */
+export interface AdvertisedParamContract {
+  name: string
+  params: readonly string[]
+  required: readonly string[]
+}
+
+/** One executor's ACCEPTED input-key contract. `strict` means the executor REJECTS
+ *  any unaccepted key (a Zod `.strict()` control tool → `unrecognized_keys`); a
+ *  non-strict executor silently ignores extras (a product-tool executor that only
+ *  reads the keys it cares about), so for it only the REQUIRED-key check bites. */
+export interface ExecutorParamContract {
+  accepted: readonly string[]
+  strict: boolean
+}
+
+export interface ParamContractCoverageInput {
+  surface: string
+  advertised: readonly AdvertisedParamContract[]
+  /** Executor contract per advertised tool name. A MISSING entry is itself a failure
+   *  (`unmapped`): an advertised tool whose executor contract is unknown cannot be
+   *  verified, and this forces the hand-kept product map to stay complete. */
+  executorsByTool: Readonly<Record<string, ExecutorParamContract>>
+}
+
+/** One offending advertised tool and why it fails. */
+export interface ParamContractOffender {
+  tool: string
+  /** Advertised REQUIRED keys the executor does not accept — the model is told to
+   *  send a key the executor rejects (strict) or never reads. */
+  requiredNotAccepted: string[]
+  /** For a strict executor only: advertised keys the executor rejects outright. */
+  advertisedNotAccepted: string[]
+  /** No executor contract was supplied for this advertised tool. */
+  unmapped: boolean
+}
+
+export interface ParamContractCoverageResult {
+  surface: string
+  advertisedCount: number
+  offenders: ParamContractOffender[]
+  fails: boolean
+  message: string
+}
+
+/** Compare each advertised tool's param contract against its executor's accepted-key
+ *  contract. FAILS when an advertised REQUIRED key is not accepted, or (for a strict
+ *  executor) any advertised key is not accepted, or an advertised tool has no known
+ *  executor contract. Pure. */
+export function analyzeAdvertisedParamContract(
+  input: ParamContractCoverageInput
+): ParamContractCoverageResult {
+  const offenders: ParamContractOffender[] = []
+  for (const tool of input.advertised) {
+    const executor = input.executorsByTool[tool.name]
+    if (!executor) {
+      offenders.push({
+        tool: tool.name,
+        requiredNotAccepted: [],
+        advertisedNotAccepted: [],
+        unmapped: true
+      })
+      continue
+    }
+    const accepted = new Set(executor.accepted)
+    const requiredNotAccepted = [...new Set(tool.required)].filter((key) => !accepted.has(key))
+    const advertisedNotAccepted = executor.strict
+      ? [...new Set(tool.params)].filter((key) => !accepted.has(key))
+      : []
+    if (requiredNotAccepted.length > 0 || advertisedNotAccepted.length > 0) {
+      offenders.push({
+        tool: tool.name,
+        requiredNotAccepted,
+        advertisedNotAccepted,
+        unmapped: false
+      })
+    }
+  }
+
+  const fails = offenders.length > 0
+  const describe = (o: ParamContractOffender): string => {
+    if (o.unmapped) return `${o.tool} (no executor contract mapped)`
+    const parts: string[] = []
+    if (o.requiredNotAccepted.length > 0) {
+      parts.push(`required-not-accepted: ${o.requiredNotAccepted.join(', ')}`)
+    }
+    if (o.advertisedNotAccepted.length > 0) {
+      parts.push(`rejected-by-strict: ${o.advertisedNotAccepted.join(', ')}`)
+    }
+    return `${o.tool} (${parts.join('; ')})`
+  }
+  return {
+    surface: input.surface,
+    advertisedCount: input.advertised.length,
+    offenders,
+    fails,
+    message: fails
+      ? `Advertised tools on "${input.surface}" whose param contract the executor rejects: ` +
+        `${offenders.map(describe).join('; ')}.`
+      : `Every advertised tool on "${input.surface}" advertises a param contract its executor ` +
+        `accepts (${input.advertised.length} scanned).`
+  }
+}
+
 export interface CoverageReport {
   results: SurfaceCoverageResult[]
   /** Results that fail the guard (`violation` or `pending-stale`). */
