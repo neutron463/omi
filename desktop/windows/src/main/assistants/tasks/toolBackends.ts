@@ -48,6 +48,15 @@ export type TaskSearchResult = {
   match_type: string
   /** Relevance ranking score (higher = more important); null when unscored. */
   relevance_score: number | null
+  /** The row's RESOLVABLE backend id (null when unsynced / local-only). Windows-only,
+   *  set only on VECTOR results — where the source table (and thus the record) is known,
+   *  so a shared rowid can never be misresolved. The `search_tasks` CHAT tool renders
+   *  `backendId ?? local:<rowid>` from it (the SAME shape `get_action_items` emits) so an
+   *  id the model discovers there resolves in the update/complete/delete task mutations
+   *  (`findByBackendId`). NOT part of Mac's Codable (TaskModels.swift:291): it is ALWAYS
+   *  stripped by `encodeSearchResults`, so the `search_similar` / `search_keywords`
+   *  extraction-loop JSON stays byte-for-byte faithful to Mac's JSONEncoder output. */
+  backendId?: string | null
 }
 
 /** The projection of a task row the backends read to build a `TaskSearchResult`.
@@ -57,6 +66,9 @@ export type ResolvedTask = {
   completed: boolean
   deleted: boolean
   relevanceScore: number | null
+  /** Resolvable backend id (null when the row is unsynced / local-only). Threaded so the
+   *  vector backend can carry it onto TaskSearchResult — see `backendId` there. */
+  backendId: string | null
 }
 
 /** One `action_items` FTS row (subset of `searchActionItemsFTS`'s return this
@@ -135,7 +147,8 @@ export async function executeVectorSearchWith(
         status: statusOf(rec),
         similarity: hit.similarity,
         match_type: 'vector',
-        relevance_score: rec.relevanceScore
+        relevance_score: rec.relevanceScore,
+        backendId: rec.backendId
       })
     }
   } catch {
@@ -210,7 +223,20 @@ export async function executeKeywordSearchWith(
  */
 export function encodeSearchResults(results: TaskSearchResult[]): string {
   try {
-    return JSON.stringify(results)
+    // Mac's Codable shape ONLY (TaskModels.swift:291): project to exactly Mac's keys so
+    // the Windows-only `backendId` (carried for the search_tasks CHAT tool) never leaks
+    // into the `search_similar` / `search_keywords` functionResponse — keeping the
+    // extraction-loop JSON byte-for-byte faithful to Mac's `JSONEncoder().encode`.
+    return JSON.stringify(
+      results.map((r) => ({
+        id: r.id,
+        description: r.description,
+        status: r.status,
+        similarity: r.similarity,
+        match_type: r.match_type,
+        relevance_score: r.relevance_score
+      }))
+    )
   } catch {
     return '[]'
   }
@@ -222,7 +248,8 @@ function projectRecord(r: ActionItemRecord | StagedTaskRecord): ResolvedTask {
     description: r.description,
     completed: r.completed,
     deleted: r.deleted,
-    relevanceScore: r.relevanceScore
+    relevanceScore: r.relevanceScore,
+    backendId: r.backendId
   }
 }
 

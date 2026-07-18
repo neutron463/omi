@@ -184,6 +184,13 @@ const SEARCH_TASKS_CAP = 10
  * (ChatToolExecutor:1131-1162): `N. [x]/[ ] description (similarity, id)`.
  * (Windows' TaskSearchResult carries `status`/`similarity` but not priority or the
  * source table, so Mac's optional ` [priority]` / `source:` segments are omitted.)
+ *
+ * The rendered `id` is the RESOLVABLE backendId (`backendId ?? local:<rowid>`) — the
+ * SAME shape `get_action_items` emits — so an id the model discovers here resolves in
+ * the update_action_item / complete_task / delete_task mutations (they look up by
+ * `findByBackendId`). This DEVIATES from Mac, which renders the raw local rowid plus a
+ * `source:` tag and therefore shares the same latent search→mutate mismatch (feeding a
+ * search hit's id to a by-backendId mutation silently no-ops); Windows fixes it here.
  */
 export function createSearchTasksExecutor(deps?: Partial<SearchTasksDeps>): ProductToolExecutor {
   const vectorSearch =
@@ -206,7 +213,12 @@ export function createSearchTasksExecutor(deps?: Partial<SearchTasksDeps>): Prod
     kept.forEach((r, i) => {
       const check = r.status === 'completed' ? '[x]' : '[ ]'
       const sim = r.similarity != null ? r.similarity.toFixed(2) : 'n/a'
-      lines.push(`${i + 1}. ${check} ${r.description} (similarity: ${sim}, id: ${r.id})`)
+      // Hand back the RESOLVABLE id, not the local sqlite rowid (`r.id`): the task
+      // mutations resolve by findByBackendId, so a rowid would make a search→mutate
+      // flow silently fail. `local:<rowid>` is the unsynced fallback — also
+      // unresolvable, but honest, and identical to get_action_items' formatTaskLine.
+      const id = r.backendId ?? `local:${r.id}`
+      lines.push(`${i + 1}. ${check} ${r.description} (similarity: ${sim}, id: ${id})`)
     })
     return lines.join('\n')
   }

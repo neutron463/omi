@@ -149,7 +149,8 @@ describe('search_tasks', () => {
       status: 'active',
       similarity: 0.71,
       match_type: 'vector',
-      relevance_score: null
+      relevance_score: null,
+      backendId: 'bk-42'
     },
     {
       id: 9,
@@ -157,7 +158,8 @@ describe('search_tasks', () => {
       status: 'completed',
       similarity: 0.55,
       match_type: 'vector',
-      relevance_score: null
+      relevance_score: null,
+      backendId: 'bk-9'
     }
   ]
 
@@ -166,14 +168,33 @@ describe('search_tasks', () => {
     expect(await exec({}, ctx())).toBe('Error: query is required')
   })
 
-  it('drops completed by default and formats rows', async () => {
+  it('drops completed by default and formats rows with the resolvable backendId', async () => {
     const vectorSearch = vi.fn(async () => results)
     const exec = createSearchTasksExecutor({ vectorSearch })
     const out = await exec({ query: 'email' }, ctx())
     expect(out).toContain('Found 1 task(s) matching "email":')
-    expect(out).toContain('1. [ ] Reply to Jane (similarity: 0.71, id: 42)')
+    // The id is the backendId (mutation-resolvable), NOT the local rowid `42`.
+    expect(out).toContain('1. [ ] Reply to Jane (similarity: 0.71, id: bk-42)')
+    expect(out).not.toContain('id: 42')
     expect(out).not.toContain('Done thing')
     expect(vectorSearch).toHaveBeenCalledWith('email')
+  })
+
+  it('falls back to local:<rowid> when a result has no backendId (unsynced), matching get_action_items', async () => {
+    const unsynced: TaskSearchResult[] = [
+      {
+        id: 7,
+        description: 'Fresh local task',
+        status: 'active',
+        similarity: 0.6,
+        match_type: 'vector',
+        relevance_score: null,
+        backendId: null
+      }
+    ]
+    const exec = createSearchTasksExecutor({ vectorSearch: vi.fn(async () => unsynced) })
+    const out = await exec({ query: 'x' }, ctx())
+    expect(out).toContain('id: local:7')
   })
 
   it('includes completed when include_completed=true', async () => {
@@ -185,6 +206,69 @@ describe('search_tasks', () => {
   it('empty results → no-tasks message', async () => {
     const exec = createSearchTasksExecutor({ vectorSearch: vi.fn(async () => []) })
     expect(await exec({ query: 'zzz' }, ctx())).toContain('No tasks found matching "zzz"')
+  })
+})
+
+// --- H2 regression: search_tasks → mutation id round-trip --------------------
+// A task discovered via search_tasks must be mutatable with the id search_tasks
+// rendered. Pre-fix, search_tasks emitted the local sqlite rowid while every mutation
+// resolves via findByBackendId, so feeding a search hit's id back silently no-op'd
+// ("task not found"). This asserts the rendered id IS the backendId and that it
+// resolves in all three mutations — and that the old rowid would NOT have.
+describe('search_tasks id feeds the task mutations (H2 regression)', () => {
+  const backendId = 'ecFT8xyzABC'
+  const rowid = 8
+  const searchHit: TaskSearchResult = {
+    id: rowid,
+    description: 'Reply to the launch thread',
+    status: 'active',
+    similarity: 0.77,
+    match_type: 'vector',
+    relevance_score: null,
+    backendId
+  }
+  const record = action({ id: rowid, backendId, description: 'Reply to the launch thread' })
+  // Resolve ONLY by the real backendId — exactly like production's findByBackendId,
+  // which scans action_items by backendId (the rowid does not resolve).
+  const mutate = () => ({
+    findByBackendId: vi.fn(async (id: string) => (id === backendId ? record : null)),
+    toggleTask: vi.fn(async () => {}),
+    updateTask: vi.fn(async () => {}),
+    deleteTask: vi.fn(async () => {})
+  })
+
+  it('renders the backendId (not the rowid) as the id', async () => {
+    const exec = createSearchTasksExecutor({ vectorSearch: vi.fn(async () => [searchHit]) })
+    const out = await exec({ query: 'launch' }, ctx())
+    expect(out).toContain(`id: ${backendId}`)
+    expect(out).not.toContain(`id: ${rowid})`)
+  })
+
+  it('the id search_tasks rendered resolves in update / complete / delete', async () => {
+    // Pull the id straight out of the rendered search_tasks row, then feed it back —
+    // this is precisely the search→mutate flow that used to fail.
+    const searchExec = createSearchTasksExecutor({ vectorSearch: vi.fn(async () => [searchHit]) })
+    const rendered = await searchExec({ query: 'launch' }, ctx())
+    const renderedId = rendered.match(/id: (\S+?)\)/)?.[1]
+    expect(renderedId).toBe(backendId)
+
+    expect(
+      await createUpdateActionItemExecutor(mutate())(
+        { action_item_id: renderedId!, description: 'Reply on the launch thread' },
+        ctx()
+      )
+    ).toBe("OK: task 'Reply to the launch thread' updated")
+    expect(await createCompleteTaskExecutor(mutate())({ task_id: renderedId! }, ctx())).toBe(
+      "OK: task 'Reply to the launch thread' marked as completed"
+    )
+    expect(await createDeleteTaskExecutor(mutate())({ task_id: renderedId! }, ctx())).toBe(
+      "OK: task 'Reply to the launch thread' deleted"
+    )
+
+    // The pre-fix rowid would NOT have resolved — the silent failure this fixes.
+    expect(await createCompleteTaskExecutor(mutate())({ task_id: String(rowid) }, ctx())).toBe(
+      `Error: task not found with id '${rowid}'`
+    )
   })
 })
 

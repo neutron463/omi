@@ -55,19 +55,22 @@ describe('buildFtsQuery', () => {
 
 // --- executeVectorSearchWith (fully-injected fakes) ---
 function resolved(over: Partial<ResolvedTask> & { description: string }): ResolvedTask {
-  return { completed: false, deleted: false, relevanceScore: null, ...over }
+  return { completed: false, deleted: false, relevanceScore: null, backendId: null, ...over }
 }
 function sim(source: TaskSimilarity['source'], id: number, similarity: number): TaskSimilarity {
   return { source, id, similarity }
 }
 
 describe('executeVectorSearchWith', () => {
-  it('keeps only hits strictly above 0.3, resolves by source, and sorts by similarity desc', async () => {
+  it('keeps only hits strictly above 0.3, resolves by source, sorts desc, and threads backendId', async () => {
     const getStagedTask = vi.fn((id: number) =>
+      // A staged hit with no backend id yet → backendId stays null.
       id === 10 ? resolved({ description: 'staged: launch email', relevanceScore: 7 }) : null
     )
     const getActionItem = vi.fn((id: number) =>
-      id === 20 ? resolved({ description: 'action: quarterly budget' }) : null
+      // A synced action-item hit → its backendId is threaded onto the result so the
+      // search_tasks CHAT tool can render a mutation-resolvable id.
+      id === 20 ? resolved({ description: 'action: quarterly budget', backendId: 'bk-20' }) : null
     )
     const deps: VectorSearchDeps = {
       embedQuery: vi.fn(async () => new Float32Array([1])),
@@ -91,7 +94,8 @@ describe('executeVectorSearchWith', () => {
         status: 'active',
         similarity: 0.9,
         match_type: 'vector',
-        relevance_score: 7
+        relevance_score: 7,
+        backendId: null
       },
       {
         id: 20,
@@ -99,7 +103,8 @@ describe('executeVectorSearchWith', () => {
         status: 'active',
         similarity: 0.5,
         match_type: 'vector',
-        relevance_score: null
+        relevance_score: null,
+        backendId: 'bk-20'
       }
     ])
     // Source-aware resolution: staged ids never hit the action resolver and vice versa.
@@ -297,5 +302,34 @@ describe('encodeSearchResults', () => {
 
   it('encodes an empty result set as "[]"', () => {
     expect(encodeSearchResults([])).toBe('[]')
+  })
+
+  it('strips the Windows-only backendId so the extraction-loop JSON stays Mac-faithful', () => {
+    // A VECTOR result carries backendId for the search_tasks CHAT tool, but the
+    // search_similar / search_keywords functionResponse must match Mac's Codable
+    // (TaskModels.swift:291) exactly — no extra key.
+    const encoded = encodeSearchResults([
+      {
+        id: 5,
+        description: 'x',
+        status: 'active',
+        similarity: 0.42,
+        match_type: 'vector',
+        relevance_score: null,
+        backendId: 'ecFT8xyz'
+      }
+    ])
+    expect(encoded).not.toContain('backendId')
+    expect(encoded).not.toContain('ecFT8xyz')
+    expect(JSON.parse(encoded)).toEqual([
+      {
+        id: 5,
+        description: 'x',
+        status: 'active',
+        similarity: 0.42,
+        match_type: 'vector',
+        relevance_score: null
+      }
+    ])
   })
 })
