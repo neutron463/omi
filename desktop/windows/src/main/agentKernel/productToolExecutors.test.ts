@@ -484,3 +484,69 @@ describe('Tier-A tools are registered + serviceable', () => {
     expect(defaultProductToolExecutors.has('search_screen_history')).toBe(false)
   })
 })
+
+// --- systemic guard: task id-source invariant --------------------------------
+// The invariant behind H2: EVERY task-listing tool that renders an `id:` must hand
+// the model an id the task mutations resolve by (findByBackendId) — i.e. the
+// backendId, or the honest `local:<rowid>` sentinel for an unsynced row — and NEVER a
+// bare numeric rowid (which findByBackendId can't resolve → the silent no-op H2 was).
+// This drives every id-rendering task tool against the SAME known task and asserts the
+// shape, so a NEW task-listing tool that leaks a rowid trips it. When you add such a
+// tool, add a row to `idRenderingTaskTools` below.
+//
+// `execute_sql` is intentionally NOT covered: it's a raw read-only SQL runner whose
+// output columns the model chooses (it can SELECT action_items.id OR backend_id), not
+// a structured task-listing renderer — same as Mac, and out of this invariant's scope.
+describe('task id-source invariant (systemic guard)', () => {
+  const rowid = 8
+  const backendId = 'bk-resolvable'
+
+  // The id token a task row renders between `id: ` and the next `,` or `)`.
+  const renderedId = (out: string): string | undefined => out.match(/id: ([^,)]+)/)?.[1]
+
+  const idRenderingTaskTools: {
+    name: string
+    render: (task: { rowid: number; backendId: string | null }) => Promise<string>
+  }[] = [
+    {
+      name: 'search_tasks',
+      render: (task) =>
+        createSearchTasksExecutor({
+          vectorSearch: vi.fn(async () => [
+            {
+              id: task.rowid,
+              description: 'known task',
+              status: 'active',
+              similarity: 0.9,
+              match_type: 'vector',
+              relevance_score: null,
+              backendId: task.backendId
+            }
+          ])
+        })({ query: 'known' }, ctx())
+    },
+    {
+      name: 'get_action_items',
+      render: (task) =>
+        createGetActionItemsExecutor({
+          getItems: vi.fn(async () => [
+            action({ id: task.rowid, backendId: task.backendId, description: 'known task' })
+          ])
+        })({}, ctx())
+    }
+  ]
+
+  for (const tool of idRenderingTaskTools) {
+    it(`${tool.name} renders the resolvable backendId — never the bare rowid — for a synced task`, async () => {
+      const id = renderedId(await tool.render({ rowid, backendId }))
+      expect(id).toBe(backendId)
+      expect(id).not.toBe(String(rowid))
+    })
+
+    it(`${tool.name} renders local:<rowid> — never the bare rowid — for an unsynced task`, async () => {
+      const id = renderedId(await tool.render({ rowid, backendId: null }))
+      expect(id).toBe(`local:${rowid}`)
+      expect(id).not.toBe(String(rowid))
+    })
+  }
+})
