@@ -52,6 +52,17 @@ export default defineConfig({
       VITE_FIREBASE_PROJECT_ID: localEnv.VITE_FIREBASE_PROJECT_ID || 'test-project'
     },
     environment: 'node',
+    // Widen Testing Library's async-util poll window (see the setup file) so the
+    // jsdom suites don't flake under the concurrent CPU load of parallel `pnpm
+    // test` runs. Harness-only: it changes timing headroom, never test outcomes.
+    setupFiles: ['./test/setup-testing-library.ts'],
+    // Raise the per-test / per-hook budgets above that widened poll window. A
+    // single test can chain several sequential waitFor calls (e.g. the keyboard-nav
+    // suite), so under load the test's total time can exceed the default 5000ms
+    // even when no individual waitFor times out. A genuinely stuck waitFor still
+    // fails fast at asyncUtilTimeout (5000ms), well under these ceilings.
+    testTimeout: 20_000,
+    hookTimeout: 20_000,
     // .tsx suites opt into jsdom per-file via `// @vitest-environment jsdom`.
     include: ['src/**/*.test.{ts,tsx}', 'scripts/**/*.test.mjs']
   }

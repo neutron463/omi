@@ -3,7 +3,7 @@
 // value, writes the flag through the scoped assistant bridge on toggle, and stays in
 // lock-step with the tray checkbox via the settings broadcast.
 import { describe, it, expect, vi, beforeEach, afterEach } from 'vitest'
-import { render, cleanup, act, fireEvent, screen } from '@testing-library/react'
+import { render, cleanup, act, fireEvent, screen, waitFor } from '@testing-library/react'
 import { ScreenAnalysisRow } from './GeneralTab'
 import { SettingsSearchProvider } from '../SettingsSearchProvider'
 import type { AssistantSettingsView } from '../../../../../shared/types'
@@ -53,22 +53,26 @@ const sw = (): HTMLButtonElement =>
   screen.getByRole('switch', { name: 'Screen Analysis' }) as HTMLButtonElement
 
 describe('GeneralTab ScreenAnalysisRow', () => {
+  // The row's checked state comes from an async assistantsGetSettings() load, so
+  // findByText('Screen Analysis') (the static label, present on the first render)
+  // can resolve BEFORE that load applies. Assert on the switch state via waitFor so
+  // the load has landed — a bare expect right after findByText reads the pre-load
+  // default and flakes under parallel-test CPU load.
   it('reflects the current screenAnalysisEnabled value once loaded', async () => {
     renderRow()
-    await screen.findByText('Screen Analysis')
-    expect(sw().getAttribute('aria-checked')).toBe('true')
+    await waitFor(() => expect(sw().getAttribute('aria-checked')).toBe('true'))
   })
 
   it('reflects an OFF value', async () => {
     store = { ...VIEW, screenAnalysisEnabled: false }
     renderRow()
-    await screen.findByText('Screen Analysis')
-    expect(sw().getAttribute('aria-checked')).toBe('false')
+    await waitFor(() => expect(sw().getAttribute('aria-checked')).toBe('false'))
   })
 
   it('writes screenAnalysisEnabled when toggled', async () => {
     renderRow()
-    await screen.findByText('Screen Analysis')
+    // Wait for the loaded ON state before toggling, so the click flips true→false.
+    await waitFor(() => expect(sw().getAttribute('aria-checked')).toBe('true'))
     act(() => {
       fireEvent.click(sw())
     })
@@ -78,11 +82,10 @@ describe('GeneralTab ScreenAnalysisRow', () => {
 
   it('re-renders from a broadcast (tray checkbox wrote the flag in another window)', async () => {
     renderRow()
-    await screen.findByText('Screen Analysis')
-    expect(sw().getAttribute('aria-checked')).toBe('true')
+    await waitFor(() => expect(sw().getAttribute('aria-checked')).toBe('true'))
     act(() => {
       changeCb?.({ ...VIEW, screenAnalysisEnabled: false })
     })
-    expect(sw().getAttribute('aria-checked')).toBe('false')
+    await waitFor(() => expect(sw().getAttribute('aria-checked')).toBe('false'))
   })
 })

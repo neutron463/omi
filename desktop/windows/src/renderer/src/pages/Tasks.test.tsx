@@ -7,7 +7,8 @@ import {
   fireEvent,
   createEvent,
   screen,
-  within
+  within,
+  act
 } from '@testing-library/react'
 import { MemoryRouter } from 'react-router-dom'
 import type { ActionItemRecord } from '../../../shared/types'
@@ -112,6 +113,24 @@ async function renderTasks(): Promise<void> {
       <Tasks />
     </MemoryRouter>
   )
+}
+
+// Render, wait for `rowText` to appear (the async store read has landed), then
+// flush React's passive effects before the test fires keyboard events. The list
+// keydown handler reads its nav state (navOrder / selectedId) from a ref that
+// Tasks.tsx populates in a no-dependency useEffect. Waiting only for the row TEXT
+// leaves a window where the row is in the DOM but that effect has not run, so the
+// ref still holds the first render's EMPTY navOrder — the first ArrowDown/ArrowUp
+// then resolves against an empty list and is dropped, leaving the selection unset
+// with no retry. That window is normally sub-frame, but under the CPU contention of
+// parallel `pnpm test` runs it widens enough to flake. Flushing effects here closes
+// it deterministically. This is a test-synchronization fix, not a product bug: no
+// real user can press a key inside that sub-frame window, and a dropped read would
+// self-correct on the next keypress.
+async function renderNavReady(rowText = 'first'): Promise<void> {
+  await renderTasks()
+  await waitFor(() => expect(screen.queryByText(rowText)).not.toBeNull())
+  await act(async () => {})
 }
 
 describe('Tasks — local-first reads from the store', () => {
@@ -318,8 +337,7 @@ describe('Tasks — keyboard navigation (mac parity, flat list)', () => {
 
   it('Down selects the first row, Down again moves to the second; Up moves back', async () => {
     incomplete = twoRows()
-    await renderTasks()
-    await waitFor(() => expect(screen.queryByText('first')).not.toBeNull())
+    await renderNavReady()
 
     fireEvent.keyDown(document.body, { key: 'ArrowDown' })
     await waitFor(() => expect(selectedText()).toContain('first'))
@@ -333,8 +351,7 @@ describe('Tasks — keyboard navigation (mac parity, flat list)', () => {
 
   it('Down clamps at the last row (no wrap)', async () => {
     incomplete = twoRows()
-    await renderTasks()
-    await waitFor(() => expect(screen.queryByText('first')).not.toBeNull())
+    await renderNavReady()
 
     fireEvent.keyDown(document.body, { key: 'ArrowDown' }) // first
     fireEvent.keyDown(document.body, { key: 'ArrowDown' }) // second
@@ -344,8 +361,7 @@ describe('Tasks — keyboard navigation (mac parity, flat list)', () => {
 
   it('Up with no selection selects the last row', async () => {
     incomplete = twoRows()
-    await renderTasks()
-    await waitFor(() => expect(screen.queryByText('first')).not.toBeNull())
+    await renderNavReady()
 
     fireEvent.keyDown(document.body, { key: 'ArrowUp' })
     await waitFor(() => expect(selectedText()).toContain('second'))
@@ -353,8 +369,7 @@ describe('Tasks — keyboard navigation (mac parity, flat list)', () => {
 
   it('Space toggles the selected row via tasksToggle', async () => {
     incomplete = twoRows()
-    await renderTasks()
-    await waitFor(() => expect(screen.queryByText('first')).not.toBeNull())
+    await renderNavReady()
 
     fireEvent.keyDown(document.body, { key: 'ArrowDown' })
     await waitFor(() => expect(selectedText()).toContain('first'))
@@ -365,8 +380,7 @@ describe('Tasks — keyboard navigation (mac parity, flat list)', () => {
 
   it('Ctrl+N opens the new-task composer', async () => {
     incomplete = twoRows()
-    await renderTasks()
-    await waitFor(() => expect(screen.queryByText('first')).not.toBeNull())
+    await renderNavReady()
 
     expect(screen.queryByPlaceholderText('What needs to get done?')).toBeNull()
     fireEvent.keyDown(document.body, { key: 'n', ctrlKey: true })
@@ -377,8 +391,7 @@ describe('Tasks — keyboard navigation (mac parity, flat list)', () => {
 
   it('Ctrl+D deletes the selected row and moves selection to the neighbour', async () => {
     incomplete = twoRows()
-    await renderTasks()
-    await waitFor(() => expect(screen.queryByText('first')).not.toBeNull())
+    await renderNavReady()
 
     fireEvent.keyDown(document.body, { key: 'ArrowDown' }) // select first
     await waitFor(() => expect(selectedText()).toContain('first'))
@@ -391,8 +404,7 @@ describe('Tasks — keyboard navigation (mac parity, flat list)', () => {
 
   it('Enter opens inline edit on the selected row', async () => {
     incomplete = twoRows()
-    await renderTasks()
-    await waitFor(() => expect(screen.queryByText('first')).not.toBeNull())
+    await renderNavReady()
 
     fireEvent.keyDown(document.body, { key: 'ArrowDown' })
     await waitFor(() => expect(selectedText()).toContain('first'))
@@ -404,8 +416,7 @@ describe('Tasks — keyboard navigation (mac parity, flat list)', () => {
 
   it('Escape clears the selection', async () => {
     incomplete = twoRows()
-    await renderTasks()
-    await waitFor(() => expect(screen.queryByText('first')).not.toBeNull())
+    await renderNavReady()
 
     fireEvent.keyDown(document.body, { key: 'ArrowDown' })
     await waitFor(() => expect(selectedText()).toContain('first'))
@@ -416,8 +427,7 @@ describe('Tasks — keyboard navigation (mac parity, flat list)', () => {
 
   it('does not run list keys while a text input is focused', async () => {
     incomplete = twoRows()
-    await renderTasks()
-    await waitFor(() => expect(screen.queryByText('first')).not.toBeNull())
+    await renderNavReady()
 
     // Open the first row's inline editor so a text input exists and is the target.
     fireEvent.click(screen.getByText('first'))
@@ -436,8 +446,7 @@ describe('Tasks — keyboard navigation (mac parity, flat list)', () => {
   // control keeps its own activation. These fail without the interactive-target guard.
   it('Space on a focused button does not toggle the selected row (button keeps activation)', async () => {
     incomplete = twoRows()
-    await renderTasks()
-    await waitFor(() => expect(screen.queryByText('first')).not.toBeNull())
+    await renderNavReady()
 
     fireEvent.keyDown(document.body, { key: 'ArrowDown' })
     await waitFor(() => expect(selectedText()).toContain('first'))
@@ -452,8 +461,7 @@ describe('Tasks — keyboard navigation (mac parity, flat list)', () => {
 
   it('Enter on a focused button does not open the editor (button keeps activation)', async () => {
     incomplete = twoRows()
-    await renderTasks()
-    await waitFor(() => expect(screen.queryByText('first')).not.toBeNull())
+    await renderNavReady()
 
     fireEvent.keyDown(document.body, { key: 'ArrowDown' })
     await waitFor(() => expect(selectedText()).toContain('first'))
@@ -469,8 +477,7 @@ describe('Tasks — keyboard navigation (mac parity, flat list)', () => {
   it('clears the keyboard selection when the filter hides the selected row', async () => {
     incomplete = [rec({ id: 1, backendId: 'b1', description: 'open row' })]
     completed = [rec({ id: 2, backendId: 'b2', description: 'done row', completed: true })]
-    await renderTasks()
-    await waitFor(() => expect(screen.queryByText('open row')).not.toBeNull())
+    await renderNavReady('open row')
 
     fireEvent.keyDown(document.body, { key: 'ArrowDown' })
     await waitFor(() => expect(selectedText()).toContain('open row'))
@@ -486,8 +493,7 @@ describe('Tasks — keyboard navigation (mac parity, flat list)', () => {
 
   it('Esc with no selection does not preventDefault (lets the global Esc→Home fire)', async () => {
     incomplete = twoRows()
-    await renderTasks()
-    await waitFor(() => expect(screen.queryByText('first')).not.toBeNull())
+    await renderNavReady()
 
     expect(selectedText()).toBeNull()
     const evt = createEvent.keyDown(document.body, { key: 'Escape' })
@@ -497,8 +503,7 @@ describe('Tasks — keyboard navigation (mac parity, flat list)', () => {
 
   it('Esc with a selection deselects and preventDefault (consumes it)', async () => {
     incomplete = twoRows()
-    await renderTasks()
-    await waitFor(() => expect(screen.queryByText('first')).not.toBeNull())
+    await renderNavReady()
 
     fireEvent.keyDown(document.body, { key: 'ArrowDown' })
     await waitFor(() => expect(selectedText()).toContain('first'))
@@ -511,8 +516,7 @@ describe('Tasks — keyboard navigation (mac parity, flat list)', () => {
 
   it('Ctrl+D on the last row moves selection to the previous row', async () => {
     incomplete = twoRows()
-    await renderTasks()
-    await waitFor(() => expect(screen.queryByText('first')).not.toBeNull())
+    await renderNavReady()
 
     fireEvent.keyDown(document.body, { key: 'ArrowUp' }) // no selection → picks last (second)
     await waitFor(() => expect(selectedText()).toContain('second'))
@@ -524,8 +528,7 @@ describe('Tasks — keyboard navigation (mac parity, flat list)', () => {
 
   it('Ctrl+D on the only row clears the selection', async () => {
     incomplete = [rec({ id: 1, backendId: 'b1', description: 'lonely' })]
-    await renderTasks()
-    await waitFor(() => expect(screen.queryByText('lonely')).not.toBeNull())
+    await renderNavReady('lonely')
 
     fireEvent.keyDown(document.body, { key: 'ArrowDown' })
     await waitFor(() => expect(selectedText()).toContain('lonely'))
@@ -539,8 +542,7 @@ describe('Tasks — keyboard navigation (mac parity, flat list)', () => {
 describe('Tasks — freshness via onTasksChanged', () => {
   it('subscribes once and re-reads the store when the change event fires', async () => {
     incomplete = [rec({ id: 1, backendId: 'b1', description: 'first' })]
-    await renderTasks()
-    await waitFor(() => expect(screen.queryByText('first')).not.toBeNull())
+    await renderNavReady()
     expect(tasks.onTasksChanged).toHaveBeenCalledTimes(1)
 
     const before = tasks.tasksListIncomplete.mock.calls.length
