@@ -388,5 +388,135 @@ layer, which survives this rewrite untouched.
 
 ---
 
-*Sections 2–6 (Windows mapping, kill/keep lists, target design, platform-forced adaptations,
-migration plan + gates) follow.*
+## 4. Target design — one owner, Mac's vocabulary, Windows' required attachments
+
+### 4.1 Shape
+
+Two modules replace the four layers, mirroring Mac's two owners one-to-one, both living in the
+**capture renderer** (where mic, hub socket, and playback already live — §5):
+
+**`pttTurnManager.ts`** (new; ports `PushToTalkManager`):
+
+```ts
+export type PttState =
+  | 'idle' | 'listening' | 'pendingLockDecision' | 'lockedListening' | 'finalizing';
+
+// Gesture events IN (from the main-process #195 gesture layer, over IPC):
+handleShortcutDown(): void   // full Mac transition table, §1.1
+handleShortcutUp(): void
+cancelListening(): void      // teardown/cancel path (always restores system audio first)
+
+// Internal, Mac-shaped:
+//  - one `state: PttState`, published to the projection store on every change
+//  - per-turn scratch reset on entry to idle (retained turn buffer, hint generation, …)
+//  - silence gate + too-short hint (Mac thresholds verbatim)
+//  - cascade: hub active → hub; warm-wait 1s buffering → hub/STT-fallback/batch
+//  - system-audio mute on capture start; RESTORE as the first statement of
+//    finalize() and stopListening()  ← the F4 invariant, ported exactly
+```
+
+**`hubTurnController.ts`** (consolidated from today's `hubController.ts` + the driver's
+hub-facing half; ports `RealtimeHubController`):
+
+```ts
+ensureWarm(); isActive(): boolean; waitUntilActive(timeoutMs): Promise<boolean>
+beginTurn(); feedAudio(pcm16k); commitTurn(): 'accepted'|'deferredForReplacement'|'rejectedNoSession'
+cancelTurn()
+
+// Internal: turnEpoch (int, ++ per beginTurn), session-identity fencing
+// (`source === session` on every socket callback + detach-before-drop),
+// toolTurnEpoch-keyed tool results, playbackEpoch-fenced player callbacks,
+// barge-in derived at beginTurn from live signals (responding || playbackActive),
+// provider strategies: OpenAI in-session cancel / Gemini per Gate M-V1 outcome.
+// KEEPS Windows' close taxonomy (setup_rejected) + circuit recovery + strike
+// budget — Mac's classifier is NOT ported (§1.5).
+```
+
+No reducer, no event queue, no coordinator object, no cross-module "handoff": barge-in is
+~40 straight-line statements inside `beginTurn()` on one JS event loop, exactly like Mac's
+one `@MainActor`.
+
+### 4.2 Integration contract (what survives around the new core)
+
+| Neighbor | Attachment in the new shape |
+|---|---|
+| **Supervisor / flight recorder / invariants** (`feat/win-voice-plane-supervisor`) | The new turn module provides the per-transition observation hook the supervisor consumes today via `VoiceTurnCoordinatorOptions.onTimelineEntry` (`voiceTurnCoordinator.ts:196-198`, fired per transition, wired by the driver at `voiceHubTurnDriver.ts:242-254`). Equivalent hook: `onTransition(entry)` with at minimum `{sequence, turnID, event, phaseBefore, phaseAfter, route, terminalReason, staleEventCount, invalidTransitionCount}` — where `turnID` maps to the epoch, and the two counters count epoch-fenced drops (stale async results) and ignored-in-state gestures. Nothing else in the supervisor plumbing reaches turn-layer internals. **The supervisor branch is under active construction (watchdog + renderer-reset consumers landing); re-run the seam check against the MERGED branch before implementation starts (Gate M-V2).** `resetVoicePlane` remains the supervisor's single reset path and calls the new module's `cancelListening()` + `hubTurnController` teardown. |
+| **Gesture layer** (#195 main-process sampler, blind-sampler debounce, 220 ms threshold) | Unchanged. It emits down/up over IPC; the turn module consumes them with Mac's transition table. Tap-lock timing already matches Mac (0.22 s / 0.4 s). |
+| **Amplitude mapper** (#197) | Unchanged — below the turn layer, feeds the orb only. |
+| **Gemini schema sanitizer** (#196) | Unchanged — lives in the session factory, below `hubTurnController`. |
+| **Kernel turn recording** (INV-CHAT-1) | Ported at Mac's exact three call sites: interrupted-turn write at barge-in `beginTurn`, completed-turn write at turn-done (deferred past tool tail), both sharing one per-turn idempotency key; `turnRecorded` once-flag. Rides the existing kernel IPC. |
+| **UI projection** (bar / pill / orb) | The swap boundary: the new module publishes the SAME projection store shape consumers read today (listening/locked/hint/thinking/responseActive fields), mirrored cross-window via the existing `captureLiveStore` → `LiveMirrorHost` op stream (§5). Consumers do not change. |
+| **System-audio mute** (`win-audio-helper`) | Mac's invariant verbatim: mute at capture start, restore-first at both exits, defensive restore at first reply audio. Plus the supervisor's runtime invariant check ("output never muted while reply playing") as the F4 backstop. |
+
+### 4.3 What Mac does NOT have that we deliberately keep (b-list summary)
+
+- Close taxonomy with `setup_rejected` + circuit recovery (Windows-ahead; §1.5).
+- The supervisor's dataflow watchdog + plane reset + flight recorder + runtime invariants
+  (fills Mac's F3/F4 gaps; sits outside the turn layer).
+- Per-phase deadlines: the reducer's deadline table dies with the reducer, but its *coverage*
+  moves into the supervisor's watchdog config (phase-appropriate unfed-deadline resets) —
+  the turn module itself carries only Mac's release watchdogs (finalization timeout,
+  warm-wait grace, hint clears). Recommendation, not a gate: deadlines belong to the
+  supervisor that can also observe dataflow, not to the state owner.
+
+---
+
+## 6. Migration plan — staged, revertible, gated
+
+Swap boundary (verified in §2/§4.2): gesture events in, projection store + kernel writes +
+playback out. Bar/pill/orb consumers and the main-process gesture layer do not change.
+
+### Phase 0 — Contract pin-down (1 agent-session)
+- **Gate M-V1 (verification, blocks Phase 2's Gemini lane):** live-verify Mac's Gemini
+  barge-in on the Mac mini reference (`ssh omi-mac`, non-GUI: named-bundle build, drive PTT
+  via the `omi-ctl` in-process bridge, barge into an active Gemini reply, read
+  `/private/tmp/omi-dev.log` for the replacement-session sequence; confirm the successor turn
+  answers and the interrupted turn lands in chat history). Outcomes:
+  - Mac behaves as designed → port the fresh-session replacement as extracted (§1.2).
+  - Mac wedges/misbehaves → **DECISION GATE D2 for Chris**: port Mac's shape anyway and fix
+    on top, or adopt the research doc's single locked-interrupt primitive for the Gemini lane
+    (deviation from port doctrine, needs sign-off).
+- **Gate M-V2:** re-run the supervisor seam check against the merged
+  `feat/win-voice-plane-supervisor` (it is still growing); freeze the `onTransition` payload.
+
+### Phase 1 — Regression harness on the OLD implementation (1–2 agent-sessions)
+Encode tonight's entire repro catalog as tests that drive the swap boundary (gesture events
+in → assert projection/kernel/audio-helper calls out), running against the CURRENT layers:
+1. Blind-sampler hold (hold discarded as tap) — #195 class.
+2. Short press / too-short turn → hint, next press not dropped — #198 class.
+3. Press during `finalizing` → ignored, no queued-event replay wedge — #198 exact.
+4. Barge-in during playback → prior reply stopped, interrupted turn recorded, successor
+   turn owns the plane (both provider lanes, session-faked).
+5. Mute-window invariant: helper `restore` observed before/at reply start; never
+   mute-active while playback-active — F4.
+6. Provider failure at commit (`rejectedNoSession`) → cascade answers the SAME turn.
+7. Socket death mid-turn → turn ends visibly, plane resets, strike/circuit behavior.
+8. Stale async results (late tool result, late playback idle, late capture start) → inert.
+Tests must pass on old AND new before any flip; they are the port's acceptance criteria, and
+they live on as the permanent hermetic suite (Definition of Done #1).
+
+### Phase 2 — Build the new core behind the boundary (2–3 agent-sessions)
+- `pttTurnManager.ts` + `hubTurnController.ts` as in §4, flag-gated
+  (`voiceTurnMacShape`, default OFF), old layers untouched.
+- Wire: gesture IPC → new module; projection store writes; supervisor `onTransition`;
+  kernel writes; audio-helper ordering.
+- Run the Phase-1 suite against the new implementation until green.
+
+### Phase 3 — Cutover and delete (1–2 agent-sessions)
+- Flip the flag ON in dev; live gauntlet: the full repro catalog exercised on a real build
+  (VB-Cable deterministic mic input), plus a soak with the supervisor's flight recorder
+  reviewed for invariant violations.
+- **DECISION GATE D1 for Chris:** ship default-ON. (Recommendation: flag-gated cutover, not
+  straight swap — it costs almost nothing since Phase 1 requires both implementations to be
+  drivable anyway, it honors the no-regressions rule, and it gives a one-commit revert. But
+  the flag must die fast: delete the old reducer/coordinator/driver layers and the flag in
+  the same wave once the gauntlet passes — two living implementations is exactly the
+  multi-owner disease this port exists to cure.)
+- Delete the kill list (§3), migrate any remaining imports, update
+  `voice-reliability-research.md` and the parity audit docs.
+
+**Total estimate: 5–8 agent-sessions**, dominated by Phase 1 (harness quality is the whole
+safety story) and the Phase-2 hub controller consolidation.
+
+*Sections 2 (Windows 4-layer inventory + mapping), 3 (kill/keep lists in full), and 5
+(platform-forced adaptations) follow.*
