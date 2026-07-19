@@ -51,6 +51,7 @@ docs/*
 !docs/multi-worktree-dev.md
 !docs/release-pipeline.md
 !docs/mac-parity-audit
+!docs/perf-profile-2026-07-19.md
 skills-lock.json
 
 # Visual brainstorming companion
