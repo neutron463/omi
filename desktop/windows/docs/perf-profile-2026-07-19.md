@@ -17,10 +17,13 @@ Branch: `chore/win-perf-profiling` (worktree `.worktrees/perfprof`). Built from 
 | 2 | Bar orb keeps its 30 fps WebGL loop running **forever while the bar is parked off-screen**, after the first summon | `BarApp.tsx:653` `visible={mode!==null}` (mode never reset on hide) + parked bar window is unthrottled | after 1st summon, permanently | one continuous 30 fps WebGL shader-render + 240 Hz tick callback in an invisible renderer | **Yes** — gate orb `visible` on the bar's real on-screen state, or reset `mode` on hide |
 | 3 | High-refresh **rAF amplification**: every `frameloop:'always'` / uncapped rAF loop runs at 240 Hz here (4× a 60 Hz budget) | orb active states, bar transitions, glow follow, graph | during any animation | up to 4× fewer frames on high-refresh displays | Mostly **Yes** (self-throttle to 30/60 like the orb already does) |
 | 4 | Auxiliary windows each load the **full SPA** (~200 MB each; ~2.2 GB RSS total) | bar/glow/insight-toast/capture hash-routes of one `index.html` | idle | ~600–800 MB RSS | **Yes** — slim per-window bundle / route code-split |
-| — | _(SQLite is well-tuned — WAL, off-thread KG writes, paged vector scan; NOT a headline hotspot, see §5)_ | | | | |
-| — | _(Voice IPC is lean — two targeted ~30 Hz streams, no fan-out; minor coalescing win only, see §4)_ | | | | |
-| 6 | Idle main-process timers that touch the DB every few seconds | rewind OCR (4 s), rewind embedding (5 s), automation foreground (5 s), usage foreground (15 s) | **idle** | fewer idle wakeups + DB hits | Some **Yes** (coalesce, back off when nothing to do) |
-| 7 | 4 auxiliary windows each load the **full SPA** (~200 MB each; ~2.2 GB RSS total) | bar/glow/insight-toast/capture = hash-routes of one `index.html` | idle | ~600–800 MB RSS | **Yes** — slim per-window bundle / route code-split |
+| 5 | **Unconditional main-thread DB tick every 3 s forever** (idle short-circuit checked *after* the query) + OCR read every 4 s | `coordinator.ts:169` `latestRewindFrame()`, `ocrService.ts:45` | **idle** | ~1200+ idle DB queries/hour removed; lets the main thread sleep | **Yes** — short-circuit before the query when nothing pending |
+| 6 | **Wasted IPC broadcast** of every live-transcript line to bar/glow/toast windows that have no listener | `captureBridge.ts:103` vs sole subscriber `App.tsx:130` | when continuous recording on | per-line serialize+dispatch to every secondary window removed | **Yes** — route "live" op to the main window only |
+| 7 | Idle main-process timer cluster (rewind 4 s/5 s + automation 5 s) keeps the process awake | §3d | **idle** | fewer idle wakeups + DB hits | Some **Yes** (coalesce, back off) |
+| 8 | `local_conversation` full-table scan on an **unindexed, never-pruned** table | `db.ts:905` `listLocalConversations` | per Conversations fetch | avoids growing full scan + filesort | **Yes** — add `created_at` index |
+
+_SQLite is otherwise well-tuned (WAL, off-thread KG writes, paged vector scan). Voice IPC is lean
+(targeted ~30 Hz streams, no fan-out). Full detail + ranking in §4/§5._
 
 Full ranking with evidence in §6.
 
@@ -198,30 +201,43 @@ tradeoff in the source — the transparent overlay doesn't get real mouse messag
 
 ## 4. IPC census (during idle and voice)
 
-Recurring cross-process IPC, traced from source (preload channel → main handler → forward target):
+Recurring cross-process IPC, traced from source (preload channel → main handler → forward target).
+All gating/throttle claims verified against the conditional code, not comments.
 
 | Channel(s) | Cadence | Direction / hops | Payload | When |
 |---|---|---|---|---|
-| `voiceHub:publishState` → `voiceHub:state` | **~30 Hz** (`ORB_PUBLISH_INTERVAL_MS=33`) | main-window renderer → main → **bar** (targeted) | small state obj (phase, orbLevel, hint) | **voice turn only** |
-| `voiceHub:publishPlaybackLevel` → `voiceHub:playbackLevel` | **~30 Hz** while Omi speaks | main-window renderer → main → **bar** (targeted) | one `number` | **voice turn only** |
-| PTT capture levels | `LEVELS_INTERVAL_MS=33` (~30 Hz) | within capture renderer / to orb | one number | **PTT hold only** |
-| tasks/goals "changed" broadcasts | on mutation (not periodic) | main → all windows | small | on change |
-| `voiceHub:state` idle reset | once per turn-end | main → all windows (`voicePlaneIpc.ts:81`) | idle sentinel | turn end |
+| `ptt-levels` (via `omi-capture:*`) | **30 Hz** (33 ms) | capture renderer → main → **owner window** (routed, not broadcast) | `{bins: number[32], orbLevel}` — a **32-element array cloned every tick** | **PTT hold only** |
+| `voiceHub:publishState` → `voiceHub:state` | **~30 Hz** (`ORB_PUBLISH_INTERVAL_MS=33`) + unthrottled on each reducer transition | main-window renderer → main → **bar** (targeted, `bar/window.ts:951`) | small obj (~7 fields) | **voice turn only** |
+| `voiceHub:publishPlaybackLevel` → `voiceHub:playbackLevel` | **~31 Hz** (worklet quantum) | main-window renderer → main → **bar** (targeted, `bar/window.ts:955`) | one `number` | **only while a reply is audibly playing** |
+| `chat:publishState` → `chat:state` | ~20 Hz (50 ms trailing) | main-window renderer → main → **bar** (targeted) | **the FULL message array every publish (not a delta)** — grows with conversation length | **only while a reply streams** |
+| `omi-capture:event` (`op:'append'/'status'/…`, "live") | bursty per STT line | capture → main → **BROADCAST to every non-capture window** | transcript line | **only if `continuousRecording` on / Live view open** |
+| `mainChat:event` / `codingAgent:event` | per SSE chunk | main → single main window | chunk | active chat/agent turn only |
+| tasks/goals "changed" | on mutation | main → windows | small | on change |
 
-**Idle:** no periodic IPC stream fires at true idle — the ~30 Hz streams are strictly voice/PTT-scoped.
-**Voice turn:** the orb state + playback level are two ~30 Hz streams, each taking **2 hops**
-(renderer→main→bar) → ~120 IPC messages/sec during an active spoken reply. **Good:** both are
-**targeted to the bar's webContents** (`bar/window.ts:163` `send()`), not broadcast — no fan-out to
-windows that would ignore them. Payloads are tiny (a number / a small object).
+**Idle:** confirmed — **no** recurring/interval IPC stream fires at true idle. Every ~30 Hz stream is
+gated behind an active PTT hold / turn / audibly-playing reply / streaming chat. (The bar's 16/50 ms
+cursor polls do native work only, not `webContents.send` — CPU, not IPC.)
 
-**Top-3 highest-frequency IPC paths:**
-1. `voiceHub:publishState`/`voiceHub:state` — ~30 Hz × 2 hops, voice turn — `bar/window.ts:952`.
-2. `voiceHub:publishPlaybackLevel`/`voiceHub:playbackLevel` — ~30 Hz × 2 hops, while speaking — `bar/window.ts:957`.
-3. PTT capture level sampling — ~30 Hz during hold — `PttCaptureHost.ts:22`.
+**Voice turn:** orb state + playback level are two ~30 Hz streams, each 2 hops (renderer→main→bar),
+~120 IPC msgs/sec during a spoken reply — all **targeted to the bar's webContents, not broadcast**
+(good, no fan-out). Payloads tiny.
 
-Verdict: the voice IPC is reasonably lean (targeted, small payloads) — not a headline hotspot. The
-only optimization worth noting: the state + level could be **coalesced into one 30 Hz message** (they
-travel the same path to the same window), halving message count during a spoken reply. Low priority.
+**Top-3 highest-frequency paths:**
+1. `ptt-levels` — 30 msg/s per PTT hold; heaviest payload (a 32-element array cloned each tick). `PttCaptureHost.ts:73`.
+2. `voiceHub:playbackLevel` — ~31 msg/s while speaking, 2 hops, cheapest payload. `bar/window.ts:955`.
+3. `voiceHub:state` — up to 30 msg/s during a turn. `bar/window.ts:951`.
+   (Honorable mention: `chat:state` re-sends the whole history every publish — per-message cost grows with thread length.)
+
+**Concrete inefficiency (→ ranked #9):** `omi-capture:event` "live" ops are broadcast to **every**
+window except capture (`ipc/captureBridge.ts:103-114`), but the only subscriber
+(`onCaptureEvent` → `LiveMirrorHost`) is mounted in the **main window only** (`App.tsx:130`) —
+`BarApp` never subscribes. So during continuous/live recording, every transcript-append line is
+serialized and structured-cloned to the bar (and any glow/toast/overlay window open) where it is
+**silently dropped with no listener** — wasted dispatch on every STT line, scaling with the number of
+open secondary windows. The voice-level streams do NOT have this problem (all correctly single-target).
+
+**Low-priority win:** `voiceHub:state` + `voiceHub:playbackLevel` travel the same path to the same
+window — coalescing into one 30 Hz message would halve voice-reply message count.
 
 ---
 
@@ -242,21 +258,25 @@ whole scan. The authors **page the scan and yield between pages** via `setImmedi
 (`scanTopKBySimilarity`, line 1686-1694), and bound the candidate set by retention. So the single
 biggest main-thread risk is handled by design.
 
-**Residual, lower-severity items:**
-| Risk | Where | Severity |
-|---|---|---|
-| Ordinary CRUD reads/writes (conversations, tasks, memories) run **synchronously on the main thread** on hot IPC handlers | `src/main/ipc/*.ts` `.prepare().all()/.get()/.run()` | Low–Med if indexed/small; a full-table `.all()` on a large table on a hot path would stall — worth a targeted audit of any unindexed `ORDER BY`/`LIKE '%…%'` |
-| Rewind timer queries every few seconds at idle | OCR backfill (4 s), embedding tick (5 s) — §3d | Low each; they keep the main thread from sleeping and each does a DB read |
-| Whole-table `.all()` reads that load a table into JS | audit any list/hydration handler | Med if a table grows unbounded |
+**Ranked main-thread offenders (worst first):**
 
-**Verdict:** SQLite is not a headline hotspot — the team has clearly been performance-conscious (WAL,
-off-thread KG writes, paged vector scan). The only actionable items are (a) confirm no hot IPC handler
-issues an unindexed full scan on a growing table, and (b) let the rewind timers back off when there's
-no pending work instead of polling the DB every 4–5 s (§6 #6).
+| # | Site | What runs | Cadence | Severity |
+|---|---|---|---|---|
+| 1 | `assistants/core/coordinator.ts:169` → `latestRewindFrame()` (`db.ts:1496`) | `SELECT … FROM rewind_frames ORDER BY ts DESC LIMIT 1` — the idle short-circuit (`key===lastFrameKey`) is checked **after** the query returns, so the SELECT fires **unconditionally** | **every 3 s, forever**, whenever screen-analysis is on (**default ON**) | **Highest (systemic)** — index-backed so sub-ms today, but it's the tightest permanent main-thread DB timer and every other assistant hangs off this tick; a regression that adds work before the short-circuit multiplies by ~1200×/hour |
+| 2 | `rewind/ocrService.ts:45` → `unindexedRewindFrames(5)` (`db.ts:1503`) | `WHERE indexed=0 ORDER BY ts LIMIT ?`; **no queue-empty gate** — always issues the SELECT; if rows found, then synchronous `readFileSync` + write per frame in the same tick | **every 4 s, forever** | High-ish (idle wakeup + unconditional read; compounds if backlog) |
+| 3 | `taskEmbeddingService.ts:110` `loadIndex()` (via `index.ts:1160`, in `ready-to-show`) | two **un-LIMITed full-table** embedding reads (`getAllActionItemEmbeddingsOn`, `getAllStagedTaskEmbeddingsOn`) — up to 5000 rows × ~12 KB BLOB each, parsed to `Float32Array` | **once, right after first paint** — blocks the just-shown window | High (worst-case blocking *duration*) |
+| 4 | `toolBackends.ts:241` `executeVectorSearch()` | `getLocalActionItems({limit:5000})` full read to resolve ids from an in-memory map | per `search_similar` tool call | Med (turn-driven, large read) |
+| 5 | `index.ts:753` `db:listLocalConversations` (`db.ts:905`) | `SELECT … FROM local_conversation ORDER BY created_at DESC` — **NO index beyond PK**, table **never pruned**, full scan + filesort + per-row `JSON.parse` of messages/segments | per Conversations-tab fetch | Med latent — full scan on an unbounded, unindexed table (add `idx_local_conversation_created_at`) |
+| 6 | `ipc/rewind.ts:87` `rewind:search` (`db.ts:1462`, FTS5 `MATCH`+`bm25` LIMIT 500) | FTS query on a **renderer-invocable** path | per keystroke if search-as-you-type | Low per call, but confirm renderer-side debounce |
+| 7 | `ipc/rewind.ts:63` `rewind:frames` (`db.ts:1428`) | `WHERE ts BETWEEN ? AND ? ORDER BY ts` — **no LIMIT**; a wide range pulls unbounded rows (OCR text) sync across IPC | on demand | Low latent (use `rewind:framesSampled` sibling) |
+| 8 | `rewind/retentionRunner.ts` `deleteRewindFramesOlderThan()` (`db.ts:1542`) | `db.transaction()` SELECT+DELETE + two `NOT IN` orphan deletes | hourly | Low freq, but a large-backlog first run could hold the transaction (and main thread) a while |
 
-> Note: this section is my own source census. If the delegated SQLite-census agent surfaces a specific
-> hot unindexed query I missed, it should be added here — but the structural picture (well-tuned, no
-> obvious main-thread catastrophe) is firm.
+**Verdict:** structurally sound (WAL, off-thread KG writes, paged vector scan) — no smoking-gun jank
+today. The high-leverage fixes are all **user-invisible**: (a) gate the coordinator 3 s tick and the
+OCR 4 s tick so they short-circuit *before* the query when there's nothing to do (§6 #6/#10); (b) add
+an index to `local_conversation` and bound `rewind:frames`; (c) move `loadIndex()`'s full-table read
+off the ready-to-show critical path (defer/idle-schedule it). Credit: this ranking is from the
+delegated SQLite-census agent's read of the source.
 
 ---
 
@@ -307,14 +327,24 @@ no pending work instead of polling the DB every 4–5 s (§6 #6).
 - **User-invisible:** Mostly **Yes** — cap animation loops at 60 fps (as the orb does), invisible
   above the point the eye resolves for these effects.
 
-### #4 — Synchronous SQLite on the main event loop
-- _See §5 (pending census). The rewind 4 s/5 s timers issuing synchronous queries on the main
-  process are the prime idle offenders; hot IPC handlers that query synchronously are the prime
-  interactive offenders._
+### #4 — Unconditional main-thread DB ticks at idle (worst systemic SQLite item)
+- **Evidence:** §5 #1/#2. The assistant coordinator fires `latestRewindFrame()` **every 3 s forever**
+  (screen-analysis default ON) with the idle short-circuit checked *after* the query
+  (`coordinator.ts:169`); the rewind OCR backfill fires `unindexedRewindFrames()` **every 4 s** with
+  no queue-empty gate (`ocrService.ts:45`). Both keep the main thread from ever sleeping and each hits
+  the DB, whether or not there's anything to do.
+- **Est. win:** removes ~1200+ idle main-thread DB queries/hour; lets the process idle.
+- **User-invisible:** **Yes** — short-circuit *before* the query when the work queue is empty / the
+  frame key is unchanged. No behaviour change (the gate result is identical, just cheaper to reach).
 
-### #5 — ~30 Hz voice IPC streams
-- _See §4 (pending census). Two 33 ms streams (orb level, playback level) cross the IPC boundary
-  per voice turn; check whether either fans out to multiple windows that ignore it._
+### #5 — Wasted IPC broadcast to windows with no listener
+- **Evidence:** §4. During continuous/live recording, every STT transcript-append line is broadcast
+  and structured-cloned to the bar/glow/toast windows (`captureBridge.ts:103`), but only the main
+  window's `LiveMirrorHost` subscribes (`App.tsx:130`) — the others silently drop it.
+- **Est. win:** eliminates a per-transcript-line serialize+dispatch to every secondary window while
+  live recording is on.
+- **User-invisible:** **Yes** — route the "live" op to the main window only (as the owner-routed PTT
+  levels already are), or have consumers opt in.
 
 ### #6 — Idle main-process timer cluster
 - **Evidence:** §3d. rewind OCR (4 s) + rewind embedding (5 s) + automation foreground (5 s) keep the
@@ -323,7 +353,7 @@ no pending work instead of polling the DB every 4–5 s (§6 #6).
   OCR/embedding tick when there's nothing pending instead of polling) → fewer idle wakeups + DB hits.
 - **User-invisible:** **Yes** if backed off only when there is demonstrably no pending work.
 
-### #8 — Auxiliary windows each load the full SPA (~200 MB each)
+### #7 — Auxiliary windows each load the full SPA (~200 MB each)
 - **Evidence:** §2a. The bar, glow, insight-toast and capture windows are all hash-routes of the
   same `index.html`, so each renderer parses the shared vendor bundle (React + three.js +
   onnxruntime + fonts). Measured 194–200 MB per auxiliary renderer; ~2.2 GB total RSS at idle.
@@ -334,7 +364,7 @@ no pending work instead of polling the DB every 4–5 s (§6 #6).
   entry/bundle, or aggressive route-level code-splitting so the vendor chunk isn't pulled into a
   window that only needs a pill). No behaviour change.
 
-### #7 — Fresh-boot hydration load
+### #8 — Fresh-boot hydration load
 - **Evidence:** §2 — right after boot a renderer sits at ~3.8 % and main at ~3.6 % for tens of
   seconds (initial data hydration + sync retry passes) before settling to the lower floor.
 - **Est. win:** minor; ensure retry passes back off and initial list renders are virtualized.
