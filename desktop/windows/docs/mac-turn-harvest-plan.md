@@ -139,6 +139,60 @@ CURRENT Swift, not line noise.
    `/private/tmp/omi-dev.log`), per the standing setup. Gemini barge-in live check (old gate
    M-V1) folds in here.
 
+### H2.1 First-pass divergence ledger (executed 2026-07-18, list-level)
+
+Method: enum-by-enum diff of the frozen reducer (`50d264c94`, == our port baseline; Windows
+`voiceTurnMachine.ts` confirmed at the same 31 unique event types) against upstream's current
+`Sources/VoiceTurnDomain/VoiceTurnStateMachine.swift` (2,155 lines vs frozen 901) and
+`VoiceTurnCoordinator.swift` (589 lines vs frozen 334 / Windows 474). Per-transition semantic
+diff and deadline *values* remain Wave H0 work (values live in config structs, not
+grep-extractable; the ported test deltas are the instrument).
+
+**Events: 31 → ~50.** Additions/renames upstream, grouped:
+
+- *Admission set* (H1.1's commits): `hubAdmissionRejected`, `hubCommitClaimed`,
+  `contextResolved`.
+- *Reconnect/replacement set* (H1.2): `providerReconnectStarted` / `providerReconnected` /
+  `providerReconnectFailed`, `providerReplacementStarted` / `providerReplacementReady` /
+  `providerReplacementFailed`.
+- **The "Scoped" identity refactor** — the biggest structural drift: `playbackStarted/Drained/
+  Failed`, `toolStarted/Finished`, `providerResponseStarted`, `providerTurnFinished` are all
+  renamed `*Scoped` (plus new `playbackProgressScoped`, `transcriptionProviderStartedScoped`,
+  `transcriptionCompletionClaimedScoped`, `authoritativeLocalResultAcceptedScoped`,
+  `screenEvidenceProtocolStartedScoped`, `screenEvidenceReportVerifiedScoped`,
+  `effectIdentityReserved`). Effects now carry coordinator-reserved turn-scoped identities
+  (`reserveEffectIdentity()`) — a systematic kill of the stale-effect class, superseding
+  ad-hoc fencing.
+- *Journal-as-phase*: `journalAccepted`, `journalFailed` events; new phase `awaitingJournal`;
+  terminal `journalFailed`; deadline `journalFinalization` — the kernel write is now a
+  supervised phase with its own deadline, not fire-and-forget.
+- Misc: `interrupt` (+ terminal `explicitInterrupt`), terminal `ownerChanged`,
+  `transcriptionFinalizationStarted/Completed`, `debugPresentationChanged`.
+
+**Phases: 9 → 10** (+`awaitingJournal`). **Terminal reasons: 16 → 19** (+`explicitInterrupt`,
+`journalFailed`, `ownerChanged`). **Deadline kinds: 10 → 14** (+`journalFinalization`,
+`providerReconnect`, `screenEvidenceProtocol`, `transcriptionFinalization`).
+
+**New `package` domain types with no Windows counterpart:** `VoiceContextOutcome`,
+`VoiceProviderConnection`, `VoiceJournalFinalization`, `VoiceTranscriptionFinalizationMode`,
+`VoiceOutputDecision`, `VoiceOutputHandoffPolicy`, `VoiceAuthoritativeLocalResultKind`,
+`VoiceTurnUICopy`.
+
+**Coordinator API growth:** output leases folded INTO the coordinator (`acquireOutput` /
+`releaseOutput` / `noteOutputProgress`), `publish(fact:)` typed-fact facade (drivers can no
+longer construct lifecycle events — `ed3ccf62d7`), `nonHubCompletionToken` /
+`completeNonHubProvider`, `isProviderConnectionReady`, `canCommitHubTurn`,
+`requireCurrentOwner` / `terminateForEffectiveOwnerTransition` (owner transitions), and a
+snapshot-observation API. Windows' `onTimelineEntry` supervisor hook is Windows-local
+(upstream observes snapshots instead) — it must be preserved through any harvest (gate M-V2).
+
+**Consequence — flag F3 (Chris/H0):** the P0 commits do NOT apply as isolated patches; they
+ride the scoped-identity + admission event model. Wave H0 must choose: **(a) sync the event
+model wholesale** to upstream-current (recommended — it *is* the accumulation of their fixes,
+and the name-for-name test port drives it mechanically), or **(b) back-port individual fixes
+onto our 31-event model** (cheaper per fix, re-diverges immediately). If (a), Wave H1 sizes at
+3–4 sessions rather than 2–3.
+
 ## H3. Tonight's Windows fixes vs upstream
 
 | Windows fix (tonight) | Upstream status | Action |
@@ -172,7 +226,7 @@ implementation. It gates every harvest wave exactly as it would have gated the r
   never freeze silently again — each voice-plane work wave starts by re-running the H1 commit
   query against `upstream/main` and triaging anything new.
 
-**Total: 4–6 agent-sessions.** Decision flags for Chris inside the harvest: **F1**
+**Total: 4–6 agent-sessions (5–7 if F3 resolves to the wholesale event-model sync — see §H2.1).** Decision flags for Chris inside the harvest: **F1**
 (fa0046a322: adopt upstream's removal of the agent-pill voice follow-up?), **F2**
 (voiceTurnOutbox: drop vs realign), and the two upstream-contribution candidates in §H3
 (Chris-manual only).
