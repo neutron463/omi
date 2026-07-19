@@ -356,6 +356,37 @@ idle close    ─ 1008 && !activeTurn && aliveFor≥60 → expectedIdleTeardown:
                 no strike, no Sentry
 ```
 
+### 1.5 Soundness audit — is Mac's implementation actually right?
+
+Chris's question, answered per behavior. Verdicts: **PROVEN** (field evidence or a structural
+argument), **PLAUSIBLE** (looks right, not independently verified), **QUESTIONABLE** (must be
+verified on the Mac mini reference before copying, or known-imperfect).
+
+| Mac behavior | Verdict | Basis |
+|---|---|---|
+| Enum + drop-unmatched-events (no queue) | **PROVEN** | Structural: an event that can't be queued can't wedge a closing turn (#198's whole class). Matches the statechart consensus ("unmatched events are inert"). Field: shipped on Mac for months with no wedge-class reports; Windows' queued-event reducer produced one tonight. |
+| Events ignored during `finalizing` (no press queuing) | **PROVEN** | Same structural argument; the too-short path even returns to `idle` *early* specifically so a rapid re-press is never dropped (`:974-977` comment documents the bug being fixed). |
+| Mute window ⊆ key-held window, restore-first ordering | **PROVEN** | Restore is the first synchronous statement of both exit paths — no code path can exit listening with audio muted. Field: Windows' F4 mute loop happened precisely by deviating from this. Defensive restore at playback start (`RealtimeHubController.swift:1594`) covers hardware-delayed restores. |
+| `turnEpoch` + per-lifetime fences (session identity, tool epoch, playback epoch, capture generation) | **PROVEN** | Structural: uniform capture-at-spawn/check-at-landing makes stale async results inert; `detach()`-before-drop makes late socket events physically undeliverable. This is Mac's entire desync answer and it is airtight *for the callbacks that are fenced*. |
+| Silence gate (energy+ZCR, Silero fallback) + thresholds | **PROVEN** | Dedicated hermetic tests (`PushToTalkSpeechGateTests.swift`: silence, broadband noise, too-short, clear short reply, sustained speech). Threshold values themselves are tuned-not-derived — port them verbatim, don't re-tune. |
+| Cascade with always-retained turn audio (turn never lost) | **PROVEN** | Structural: every failure path re-transcribes the same retained buffer; `.rejectedNoSession`/warm-wait/omni-death all verified by code path + `RealtimeHubBargeInContinuityTests.testBeginTurnWaitsForActiveSessionBeforeActivityStart` etc. |
+| Too-short hint UX (2 s, generation-fenced) | **PROVEN** | Small, tested by usage; the generation tag exists because the naive version had a real bug (comment `:99-101`). |
+| Barge-in detection from live signals (no barge-in state/event) | **PROVEN** (shape) | Structural: deriving barge-in at `beginTurn` from `responding \|\| playbackActive` cannot desync from a separately-tracked flag. The *shape* is sound regardless of provider quirks. |
+| Barge-in, OpenAI lane (`cancelActiveResponse`, same socket) | **PLAUSIBLE** | Matches OpenAI Realtime's documented `response.cancel` + truncate semantics. Not live-verified by us on Mac; low complexity. |
+| **Barge-in, Gemini lane (fresh-session replacement + deferred commit replay)** | **QUESTIONABLE — verify live before porting** | The earlier wiring audit (`desktop/windows/docs/mac-parity-audit/WIRING-AUDIT.md`) explicitly listed Gemini barge-in as an "is Mac even right?" contract question. It is also the most intricate flow in the file (mint-during-barge, buffered replay, `.deferredForReplacement`) AND the most bug-prone flow in tonight's Windows repro catalog. Mac has hermetic tests for the *ordering* (`RealtimeHubBargeInContinuityTests`) but ordering tests don't prove the provider contract. **Gate M-V1 (§6): live-verify on the Mac mini reference before implementation** — non-GUI: build, drive PTT via the `omi-ctl` bridge, barge into an active Gemini reply, read `/private/tmp/omi-dev.log` for the replacement-session sequence and confirm the successor turn answers correctly. Port the flow only as-verified. |
+| Close classification (`RealtimeHubCloseClassifier`) + 5-strike re-warm | **QUESTIONABLE — known-imperfect; keep Windows' improvements** | Only `1008` closes are classified; a fast setup-reject (the Gemini tool-schema class Windows hit in #196) reads as `providerPolicyCloseFast`, drains 5 strikes, then auto-re-warm stops — no circuit *recovery*. The research doc already established Windows' close taxonomy (`setup_rejected`) + circuit recovery are an improvement over Mac. **Do not port Mac's classifier; keep Windows' (b-list, §3).** Mac's strike-reset rules (completed turn, aliveFor>60 s) are sound and already mirrored. |
+| No dataflow watchdog (no heartbeat/idle-frame observer) | **QUESTIONABLE — known gap (F3)** | Mac simply lacks it; silent midstream stalls would present as a hung "thinking" state until the user re-presses. The Windows supervisor layer (`feat/win-voice-plane-supervisor`) exists to fill exactly this; it stays (§3). Do not treat Mac's absence of a watchdog as a design decision to copy. |
+| Warm lifecycle (mint/BYOK/failover, seed-stale reconnect) | **PLAUSIBLE** | Shipped and stable, but the research doc notes Mac ignores Gemini `sessionResumption`/`goAway` (hand-rolled continuity instead). Out of scope for the turn-shape port; noted as follow-up, not blindly endorsed. |
+| Playback lease coordinator + glow gate | **PLAUSIBLE** | Small, single-owner by construction; no known field defects. Windows already has an output-lease concept to map onto it. |
+| Turn-complete deferred on pending tool results | **PROVEN** (shape) | Structural: prevents recording/ending a turn whose tool tail is still speaking. Epoch-keyed result gating is tested (`RealtimeHubToolFailureTypingTests`, `RealtimeHubSpawnAgentTests`). |
+
+Net: the **shape** (two owners, enum, epochs, drop-don't-queue, restore-first) is sound with
+field + structural evidence. Two flows must NOT be transliterated blind: **Gemini barge-in**
+(live-verify first, Gate M-V1) and **close classification/circuit** (Windows' version is
+better — keep it). One Mac gap (no dataflow watchdog) is filled by the Windows supervisor
+layer, which survives this rewrite untouched.
+
 ---
 
-*Sections 2–5 (Windows mapping, kill/keep lists, target design, migration plan) follow.*
+*Sections 2–6 (Windows mapping, kill/keep lists, target design, platform-forced adaptations,
+migration plan + gates) follow.*
