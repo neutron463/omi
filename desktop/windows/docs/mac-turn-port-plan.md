@@ -1,29 +1,99 @@
 # Mac-shape voice turn port plan (Windows)
 
-**Status: implementation-ready design doc — no code changes in this branch.**
+**Status: design doc, PREMISE REVISED mid-write — read §0 first. No code changes in this branch.**
 2026-07-18. Directive (Chris): *"why the hell did we invent this system, why didn't we just copy
 what worked on mac. we need to do that immediately."*
 
-Scope: replace the Windows app's invented 4-layer voice-turn machinery
-(reducer / coordinator / driver / hubController seams) with the Mac app's proven two-owner shape.
-Implementation starts after `feat/win-voice-plane-supervisor` (supervisor + `resetVoicePlane` +
-flight recorder + invariant checks) merges — that harness sits OUTSIDE the turn layer and is the
-safety net for this rewrite.
+> **§0 finding, in one line:** Windows did NOT invent the 4-layer turn machinery — it is an
+> honest port of **upstream** Mac's current reducer design (adopted upstream 2026-07-09); the
+> "Mac has just an enum" claim came from searching the **fork's** Mac tree, which froze hours
+> before that adoption. The directive's factual premise is wrong, and the direction is now
+> **Decision Gate D0** for Chris. This doc carries both options: §1 extracts the pre-reducer
+> two-owner Mac (Option 2's spec), §0.3 outlines the fidelity-audit path (Option 1).
 
 Companion research: `desktop/windows/docs/voice-reliability-research.md` (uncommitted, primary
-checkout) — establishes that every wedge bug from 2026-07-18 (#198 drop-queued-events, the
-barge-in seams, the desync class) lived in seams between invented layers that Mac does not have.
+checkout). Its architectural comparison (§2 there) remains useful; its claim that Mac never had
+a VoiceTurn reducer is **wrong for upstream Mac** — see §0.
 
 ---
 
-## 1. Mac's actual design (extracted from source, not inferred)
+## 0. Provenance finding — the premise, corrected (DECISION GATE D0)
 
-Mac has exactly **two owners**, both `@MainActor` singletons, communicating by direct method
-calls. There is no reducer, no event queue, no coordinator object, no state-machine module.
-`VoiceTurnStateMachine.swift` / `VoiceTurnCoordinator.swift` — the files the Windows port claims
-to mirror — **do not exist in the Mac source tree** (verified: `git ls-files | grep -i voiceturn`
-returns only Windows-side artifacts; the Mac voice plane is `PushToTalkManager.swift` +
-`RealtimeHub*.swift`).
+### 0.1 What is actually true (git evidence, reproducible)
+
+- **Upstream Mac adopted the reducer design 9 days ago.** Commit `0455398a27`
+  ("refactor(desktop): make voice turns reducer-driven", David Zhang, 2026-07-09 20:59 -0400)
+  adds `VoiceTurnStateMachine.swift` (848 lines), `VoiceTurnCoordinator.swift` (329),
+  `VoiceTurnReducerTests.swift` (688), `VoiceTurnCoordinatorTests.swift` (259) and reworks
+  `PTTVoiceOutputCoordinator.swift`. Its message states the motivation: *"Centralize PTT
+  lifecycle, deadlines, UI projection, and terminal ownership in a typed reducer/coordinator.
+  Fence provider callbacks, persistence, seed refresh, and audible output with turn-scoped
+  identities and leases."* — i.e., **upstream hit reliability problems in the two-owner design
+  and built the reducer as the fix.** These files are live on `upstream/main` today.
+- **The fork diverged hours before that.** `git merge-base origin/main upstream/main` =
+  `0d09ede61b` (2026-07-09 22:15 UTC); the reducer commit (2026-07-10 00:59 UTC) is not an
+  ancestor. The fork's `desktop/macos` tree — the one searched by the research report and
+  extracted in §1 of this doc — is the **pre-reducer** Mac, frozen ~3 h before upstream
+  replaced it. `git ls-tree origin/main` confirms zero `VoiceTurn*` files.
+- **Windows' provenance headers are accurate.** `voiceTurnMachine.ts` landed 2026-07-14
+  (`f9df858602`, "pure VoiceTurn reducer + ported Swift invariant tests [Track 2 A5 PR1]") as a
+  genuine port of upstream's then-current Swift, tests kept name-for-name. No invention, no
+  fabricated provenance.
+- **Upstream is actively stabilizing the same design our port froze at day-5 of.** 66 commits
+  touch `VoiceTurn*` / `PushToTalkManager.swift` / `RealtimeHubController.swift` on
+  `upstream/main` since 2026-07-09, several rhyming with tonight's Windows wedge catalog:
+  `a4bb0e32ad` "make PTT session handoff reliable", `711b3a13af` "recover PTT after rejected
+  hub admission", `337ee3da86` "preserve completed PTT reconnects", `4a966a0ebb` "legible PTT
+  failure and progress UX".
+- How the error happened: the researcher searched the fork checkout, where the Swift files
+  genuinely don't exist — the known empty-grep-≠-absence failure mode, at *remote* granularity
+  (fork vs upstream), compounded by the repo's history of fork/upstream base confusion.
+
+### 0.2 DECISION GATE D0 (Chris) — which direction?
+
+| | **Option 1 — stay on the reducer; fidelity-audit + harvest upstream fixes** | **Option 2 — adopt the pre-reducer two-owner shape (this doc's §1)** |
+|---|---|---|
+| Port doctrine | Follows it (upstream Mac's *current* design is the reference) | Violates it (adopts a design upstream explicitly abandoned) |
+| Wedge evidence | Tonight's wedges are in OUR 5-day-stale port; upstream's fix stream suggests the design stabilizes; several fixes may be directly harvestable | The two-owner shape structurally lacks the seams the wedges lived in (drop-don't-queue, single owner) — §1.5's structural arguments are real |
+| Field evidence | Upstream Mac ships it NOW (the Mac mini reference runs it) | Shipped on Mac for months pre-07-09; but upstream judged it insufficient (their stated reasons mirror OUR supervisor branch's goals) |
+| Cost | Diff-map 66 upstream commits, port relevant fixes, align divergences (~3-5 sessions) | Full rewrite per §6 (~5-8 sessions) + permanent divergence from upstream Mac |
+| Risk | Stays coupled to a young, still-churning upstream design | Foregoes every future upstream voice fix; we own the design alone |
+
+**Recommendation (mine, for Chris to accept/override):** Option 1 first — run the fidelity
+diff-map (§0.3) before committing to either. If the diff shows tonight's wedge classes have
+upstream fixes we simply never pulled, Option 1 wins outright and cheaply. If the diff shows
+upstream is still fighting the same wedge classes in Swift, that is strong evidence the design
+itself is the liability, and Option 2 (this doc's §§1-6) proceeds with its premise *earned*
+rather than assumed. Note: upstream's stated reasons for the reducer (deadlines, fencing,
+terminal ownership, projection) are exactly what our supervisor branch provides *outside* the
+turn layer — so Option 2 + supervisor is not naively reverting to the design upstream outgrew.
+
+### 0.3 Option 1 outline (if D0 = fidelity audit)
+
+1. Diff-map: for each of the 66 upstream voice commits since `0455398a27`, classify —
+   already-ported / not-ported-and-relevant (map to tonight's repro catalog) / Mac-only.
+2. Port the relevant fixes; re-verify the ported reducer against upstream's current
+   `VoiceTurnReducerTests` (names were kept verbatim — the suites should re-sync mechanically).
+3. Live-verify the wedge catalog on the Mac mini (upstream code) to confirm the design's
+   current behavior — same Gate M-V1 machinery as §6, now serving fidelity instead of port.
+4. Keep the supervisor layer regardless (it addresses gaps neither design covers: dataflow
+   watchdog, F4 cross-port invariants).
+
+---
+
+## 1. The pre-reducer Mac design (fork tree — this is Option 2's spec)
+
+**Provenance (per §0):** this section extracts the Mac design as of the fork's tree
+(`origin/main`, = upstream at 2026-07-09 22:15 UTC, hours before upstream adopted the reducer).
+It shipped on Mac for months up to that date. It is NOT upstream Mac's current design — read it
+as the faithful spec for Option 2, not as "what Mac does today". All file:line citations are
+against the fork tree.
+
+This Mac has exactly **two owners**, both `@MainActor` singletons, communicating by direct
+method calls: no reducer, no event queue, no coordinator object, no state-machine module
+(`VoiceTurnStateMachine.swift` / `VoiceTurnCoordinator.swift` do not exist at this tree state;
+the voice plane is `PushToTalkManager.swift` + `RealtimeHub*.swift`, with
+`PTTVoiceOutputCoordinator.swift` as a small playback-lease helper that exists in both eras).
 
 ### 1.1 Owner 1 — `PushToTalkManager` (gesture + turn lifecycle)
 
@@ -88,7 +158,7 @@ Notes that matter for the port:
 
 That's all. There is no per-phase deadline table and no independent supervisor on Mac — a
 release watchdog per async wait, generation-fenced. (The Windows supervisor layer is our
-*addition* and stays; see §3.)
+*addition* and stays; see §2.3 and §4.3.)
 
 #### Audio mute invariant (the F4 lesson, as Mac implements it)
 
@@ -374,8 +444,8 @@ verified on the Mac mini reference before copying, or known-imperfect).
 | Barge-in detection from live signals (no barge-in state/event) | **PROVEN** (shape) | Structural: deriving barge-in at `beginTurn` from `responding \|\| playbackActive` cannot desync from a separately-tracked flag. The *shape* is sound regardless of provider quirks. |
 | Barge-in, OpenAI lane (`cancelActiveResponse`, same socket) | **PLAUSIBLE** | Matches OpenAI Realtime's documented `response.cancel` + truncate semantics. Not live-verified by us on Mac; low complexity. |
 | **Barge-in, Gemini lane (fresh-session replacement + deferred commit replay)** | **QUESTIONABLE — verify live before porting** | The earlier wiring audit (`desktop/windows/docs/mac-parity-audit/WIRING-AUDIT.md`) explicitly listed Gemini barge-in as an "is Mac even right?" contract question. It is also the most intricate flow in the file (mint-during-barge, buffered replay, `.deferredForReplacement`) AND the most bug-prone flow in tonight's Windows repro catalog. Mac has hermetic tests for the *ordering* (`RealtimeHubBargeInContinuityTests`) but ordering tests don't prove the provider contract. **Gate M-V1 (§6): live-verify on the Mac mini reference before implementation** — non-GUI: build, drive PTT via the `omi-ctl` bridge, barge into an active Gemini reply, read `/private/tmp/omi-dev.log` for the replacement-session sequence and confirm the successor turn answers correctly. Port the flow only as-verified. |
-| Close classification (`RealtimeHubCloseClassifier`) + 5-strike re-warm | **QUESTIONABLE — known-imperfect; keep Windows' improvements** | Only `1008` closes are classified; a fast setup-reject (the Gemini tool-schema class Windows hit in #196) reads as `providerPolicyCloseFast`, drains 5 strikes, then auto-re-warm stops — no circuit *recovery*. The research doc already established Windows' close taxonomy (`setup_rejected`) + circuit recovery are an improvement over Mac. **Do not port Mac's classifier; keep Windows' (b-list, §3).** Mac's strike-reset rules (completed turn, aliveFor>60 s) are sound and already mirrored. |
-| No dataflow watchdog (no heartbeat/idle-frame observer) | **QUESTIONABLE — known gap (F3)** | Mac simply lacks it; silent midstream stalls would present as a hung "thinking" state until the user re-presses. The Windows supervisor layer (`feat/win-voice-plane-supervisor`) exists to fill exactly this; it stays (§3). Do not treat Mac's absence of a watchdog as a design decision to copy. |
+| Close classification (`RealtimeHubCloseClassifier`) + 5-strike re-warm | **QUESTIONABLE — known-imperfect; keep Windows' improvements** | Only `1008` closes are classified; a fast setup-reject (the Gemini tool-schema class Windows hit in #196) reads as `providerPolicyCloseFast`, drains 5 strikes, then auto-re-warm stops — no circuit *recovery*. The research doc already established Windows' close taxonomy (`setup_rejected`) + circuit recovery are an improvement over Mac. **Do not port Mac's classifier; keep Windows' (§2.3 keep list).** Mac's strike-reset rules (completed turn, aliveFor>60 s) are sound and already mirrored. |
+| No dataflow watchdog (no heartbeat/idle-frame observer) | **QUESTIONABLE — known gap (F3)** | Mac simply lacks it; silent midstream stalls would present as a hung "thinking" state until the user re-presses. The Windows supervisor layer (`feat/win-voice-plane-supervisor`) exists to fill exactly this; it stays (§2.3). Do not treat Mac's absence of a watchdog as a design decision to copy. |
 | Warm lifecycle (mint/BYOK/failover, seed-stale reconnect) | **PLAUSIBLE** | Shipped and stable, but the research doc notes Mac ignores Gemini `sessionResumption`/`goAway` (hand-rolled continuity instead). Out of scope for the turn-shape port; noted as follow-up, not blindly endorsed. |
 | Playback lease coordinator + glow gate | **PLAUSIBLE** | Small, single-owner by construction; no known field defects. Windows already has an output-lease concept to map onto it. |
 | Turn-complete deferred on pending tool results | **PROVEN** (shape) | Structural: prevents recording/ending a turn whose tool tail is still speaking. Epoch-keyed result gating is tested (`RealtimeHubToolFailureTypingTests`, `RealtimeHubSpawnAgentTests`). |
@@ -386,9 +456,77 @@ field + structural evidence. Two flows must NOT be transliterated blind: **Gemin
 better — keep it). One Mac gap (no dataflow watchdog) is filled by the Windows supervisor
 layer, which survives this rewrite untouched.
 
+**§0 caveat on the whole table:** upstream abandoned this design on 2026-07-09 for stated
+reliability reasons (deadlines, fencing, terminal ownership, projection — `0455398a27`). The
+structural verdicts above stand on their own merits, but "PROVEN by field evidence" now means
+"proven through 2026-07-09"; the strongest counter-evidence to this design is that its own
+authors replaced it. Weigh under D0. The Mac-mini reference now runs the REDUCER design, so
+Gate M-V1's live verification exercises upstream's current barge-in, not this section's —
+which serves Option 1 directly, and serves Option 2 only as a contract oracle (what the
+provider tolerates), not as a behavior oracle.
+
 ---
 
-## 4. Target design — one owner, Mac's vocabulary, Windows' required attachments
+## 2. The Windows layers, mapped
+
+**Provenance (per §0):** these files are honest ports of upstream Mac's reducer design
+(headers cite `VoiceTurnStateMachine.swift` etc.; tests ported name-for-name in
+`f9df858602`, 2026-07-14), frozen at day-5 of a design upstream has since amended 66 times.
+Under **Option 1** this section's mapping becomes a fidelity diff against upstream's current
+Swift; under **Option 2** it is the demolition survey below.
+
+### 2.1 The swap boundary (verified — identical under both options)
+
+The turn subsystem's external interface is already clean, which is what makes either
+direction safe:
+
+- **IN:** gesture events from `usePushToTalk` (three hub-delegate calls: begin / audio /
+  release-or-cancel), fed by the main-process #195 gesture layer over IPC; hub socket events
+  from the session layer.
+- **OUT:** everything else is injected through `VoiceHubTurnDriverDeps` — UI projection,
+  kernel turn recording, playback control, telemetry, and tool-execution IPC. No consumer
+  reaches into turn-layer internals.
+- **Supervisor observation:** one hook — `VoiceTurnCoordinatorOptions.onTimelineEntry`
+  (`voiceTurnCoordinator.ts:196-198`, fired per transition inside `contain()` at `:479`),
+  payload `VoiceTurnTimelineEntry {sequence, turnID, event, phaseBefore, phaseAfter, route,
+  terminalReason, staleEventCount, invalidTransitionCount}`, wired by the driver at
+  `voiceHubTurnDriver.ts:242-254`. The driver's own ~10 `flightRecord` call sites key off
+  driver-local state and survive any swap that preserves `dispatch()`/`begin()`/`cancel()`
+  signatures.
+- **Not part of this subsystem (do not touch):** the legacy local PTT pipeline
+  (`ptt/machine.ts`) is a separate surface and survives any swap; `voiceController` /
+  `sessionMachine` are the ambient Home-surface voice path, NOT the PTT cascade (a prior
+  session's misidentification, now corrected).
+
+### 2.2 Layer-by-layer disposition (Option 2)
+
+| Windows layer | Role today | Disposition under Option 2 |
+|---|---|---|
+| `turn/voiceTurnMachine.ts` (reducer) | Ported upstream reducer: typed events, queued-event mechanics, `DEFAULT_VOICE_TURN_DEADLINES` (`:352`), barge-in `terminate(interruptedByBargeIn)` socket-handoff (`:604`) | **DIES.** Replaced by `pttTurnManager.ts` (§4.1): enum + drop-unmatched. Deadline *coverage* moves to the supervisor watchdog. The #198 class (queued events replayed into a closing turn) is structurally unrepresentable after this. |
+| `turn/voiceTurnCoordinator.ts` | Containment wrapper + 256-entry timeline (`:214`) + `onTimelineEntry` | **DIES.** Timeline superseded by the supervisor's plane-wide flight recorder; the new module emits `onTransition` with the same minimum payload (§4.2) so the supervisor plumbing is unaffected. |
+| `voiceHubTurnDriver.ts` | Glue: reducer↔hub↔capture↔projection; 45 s release watchdog (`:85`, `fireReleaseWatchdog` `:705`) | **DIES as a layer.** Its hub-facing half folds into `hubTurnController.ts`; its release watchdog becomes Mac's finalization timeouts + the supervisor. Its dep-injection surface (`VoiceHubTurnDriverDeps`) is retained as the new modules' constructor contract so consumers don't change. |
+| `hub/hubController.ts` + `hub/hubClose.ts` | Socket lifecycle, warm/strike/circuit, close taxonomy | **CONSOLIDATED, not killed** → `hubTurnController.ts`, keeping the Windows-ahead close taxonomy (`setup_rejected`) + circuit recovery (§1.5), gaining Mac's epoch/identity fencing and detach-before-drop. |
+| `turn/voiceOutputCoordinator.ts` | Port of `PTTVoiceOutputCoordinator.swift` (playback-lane leases) | **KEEPS.** This helper exists in BOTH Mac eras — it is not part of the reducer superstructure. |
+| `turn/voiceTurnHost.ts` | Host wiring for the turn dir | **DIES with the dir**; replaced by the two-module wiring. |
+| `src/main/ipc/voiceTurnOutbox.ts` | Durable kernel-write outbox (main process) | **KEEPS** — it is the INV-CHAT-1 transport, below the swap boundary. |
+
+### 2.3 Kill / keep summary
+
+**Kill (Option 2):** the reducer and its event queue; the per-phase deadline table (coverage →
+supervisor); the coordinator object and its private timeline; the driver layer and its
+release watchdog; every multi-owner handoff (most importantly the three-owner barge-in
+socket handoff at `voiceTurnMachine.ts:604`).
+
+**Keep (both options):** #195 gesture layer (main process) · #197 amplitude mapper · #196
+Gemini schema sanitizer · Windows close taxonomy + circuit recovery · supervisor / flight
+recorder / `resetVoicePlane` / runtime invariants (`feat/win-voice-plane-supervisor`) ·
+`voiceOutputCoordinator` · kernel outbox + INV-CHAT-1 recording discipline ·
+`captureLiveStore`→`LiveMirrorHost` projection transport · legacy `ptt/machine.ts` pipeline ·
+bar/pill/orb consumers unchanged.
+
+---
+
+## 4. Target design (OPTION 2 ONLY) — one owner, Mac's vocabulary, Windows' required attachments
 
 ### 4.1 Shape
 
@@ -461,7 +599,34 @@ one `@MainActor`.
 
 ---
 
-## 6. Migration plan — staged, revertible, gated
+## 5. Platform-forced adaptations — where Mac's shape cannot port literally
+
+Mac is one process with one `@MainActor`: gesture events, turn state, socket callbacks,
+playback callbacks, and UI writes are all serialized on one actor, and `@Published` reaches
+SwiftUI directly. Windows is multi-process: the **gesture sampler lives in the main process**
+(RegisterHotKey + GetAsyncKeyState, #195), while **mic capture, the hub socket, and playback
+live in the capture renderer — a separate BrowserWindow from both the bar window and the main
+UI window** (the known capture-vs-UI renderer split: in-memory signals set in capture code
+never reach the other windows). Each Mac assumption, and its minimal bridge:
+
+| Mac assumption | Windows reality | Minimal bridging construct (prefer existing patterns) |
+|---|---|---|
+| One actor serializes everything | Both new modules live in the **capture renderer**; its single JS event loop is the `@MainActor` equivalent. Gesture events arrive over IPC | Electron IPC on one channel is FIFO; the turn module consumes down/up in arrival order. No new coordination invented — this is today's `usePushToTalk` feed, unchanged. |
+| `@Published` bar state, written directly | Cross-window UI cannot be set from capture code (renderer-split gotcha) | Projection store written by the turn module, mirrored via the existing `captureLiveStore` `LiveStoreOp` stream → `LiveMirrorHost` in the bar/main windows. Same fields as today's projection (swap boundary). Includes the too-short hint and usage-limit popup signals — both MUST ride the mirror or they are silent no-ops. |
+| `SystemAudioMuteController` is synchronous CoreAudio, restore-first ordering is trivially safe | `win-audio-helper` is driven from the main process over async IPC | Preserve *ordering*, not synchrony: the restore IPC is issued as the first statement of finalize/teardown (same site discipline as Mac); reply playback starts later from the same renderer, so restore-before-playback ordering holds per-channel. Belt-and-suspenders: Mac's defensive restore at first reply audio, plus the supervisor's runtime invariant ("never muted while reply playing") as the F4 heal. |
+| Screenshot / screen context captured in-process | Capture goes through main-process APIs, async | Epoch-fence the landing exactly like Mac fences its own async capture (`turnGeneration` pattern, §1.2) — the fence, not the transport, is what Mac actually relies on. |
+| Kernel writes are in-process async tasks | Kernel store is in the main process | Existing `voiceTurnOutbox` IPC with per-turn idempotency keys — already the durable INV-CHAT-1 transport; no change. |
+| `NSEvent` monitors deliver key-up reliably | Elevated/UIPI foreground windows blind `GetAsyncKeyState` (#195 blind-sampler) | Unchanged #195 gesture layer: trust-repeats + 2-sample release debounce stays in the main process, BELOW the turn module. The turn module sees clean down/up only. |
+
+The honest summary: Mac's *serialization* assumption ports cleanly (one renderer, one event
+loop); Mac's *direct-write* assumptions all cross a window or process boundary and each one
+already has an established transport in the codebase — the adaptations select existing
+patterns, they do not invent coordination.
+## 6. Migration plan (OPTION 2 ONLY) — staged, revertible, gated
+
+*(If D0 = Option 1, this section is replaced by §0.3's fidelity-audit flow; Phase 1's
+regression harness and Gates M-V1/M-V2 are shared by both options and should be built first
+regardless of the D0 outcome — they are direction-neutral.)*
 
 Swap boundary (verified in §2/§4.2): gesture events in, projection store + kernel writes +
 playback out. Bar/pill/orb consumers and the main-process gesture layer do not change.
@@ -512,11 +677,36 @@ they live on as the permanent hermetic suite (Definition of Done #1).
   the flag must die fast: delete the old reducer/coordinator/driver layers and the flag in
   the same wave once the gauntlet passes — two living implementations is exactly the
   multi-owner disease this port exists to cure.)
-- Delete the kill list (§3), migrate any remaining imports, update
+- Delete the kill list (§2.3), migrate any remaining imports, update
   `voice-reliability-research.md` and the parity audit docs.
 
 **Total estimate: 5–8 agent-sessions**, dominated by Phase 1 (harness quality is the whole
 safety story) and the Phase-2 hub controller consolidation.
 
-*Sections 2 (Windows 4-layer inventory + mapping), 3 (kill/keep lists in full), and 5
-(platform-forced adaptations) follow.*
+
+---
+
+## 7. Gates summary (for Chris)
+
+**Decision gates (need Chris):**
+
+- **D0 — direction (blocks all implementation).** Option 1: keep the ported reducer design,
+  fidelity-audit against upstream and harvest its 66-commit fix stream (§0.2/§0.3). Option 2:
+  adopt the pre-reducer two-owner shape (§§1, 4, 6). Recommendation: run Option 1's diff-map
+  first — it is cheap (~1 session), and its outcome decides D0 with evidence instead of taste.
+- **D1 — cutover default** (Option 2 only, §6 Phase 3): flip `voiceTurnMacShape` default-ON.
+  Recommendation: flag-gated cutover with the flag and old code deleted in the same wave.
+- **D2 — Gemini barge-in strategy if live verification shows Mac misbehaving** (§6 Phase 0):
+  port as-is and fix on top, or adopt the single locked-interrupt primitive.
+
+**Verification gates (agent work, no Chris input needed):**
+
+- **M-V1** — live Gemini barge-in verification on the Mac mini reference (runs upstream's
+  current reducer code — serves Option 1 directly; serves Option 2 as a provider-contract
+  oracle only, per §1.5).
+- **M-V2** — re-run the supervisor seam check against the merged
+  `feat/win-voice-plane-supervisor`; freeze the `onTransition` payload.
+
+**Direction-neutral work that can start before D0 is decided:** the §6 Phase-1 regression
+harness (tonight's full repro catalog at the swap boundary — required by both options), M-V1,
+M-V2, and the §0.3 diff-map. Everything else waits for D0.
