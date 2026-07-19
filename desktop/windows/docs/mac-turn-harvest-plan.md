@@ -186,12 +186,13 @@ longer construct lifecycle events — `ed3ccf62d7`), `nonHubCompletionToken` /
 snapshot-observation API. Windows' `onTimelineEntry` supervisor hook is Windows-local
 (upstream observes snapshots instead) — it must be preserved through any harvest (gate M-V2).
 
-**Consequence — flag F3 (Chris/H0):** the P0 commits do NOT apply as isolated patches; they
-ride the scoped-identity + admission event model. Wave H0 must choose: **(a) sync the event
-model wholesale** to upstream-current (recommended — it *is* the accumulation of their fixes,
-and the name-for-name test port drives it mechanically), or **(b) back-port individual fixes
-onto our 31-event model** (cheaper per fix, re-diverges immediately). If (a), Wave H1 sizes at
-3–4 sessions rather than 2–3.
+**Consequence — flag F3, RESOLVED (Chris, 2026-07-18): option (a) — wholesale event-model
+sync.** The P0 commits do NOT apply as isolated patches; they ride the scoped-identity +
+admission event model, so Wave H1 syncs the reducer/coordinator event model to
+upstream-current wholesale, driven mechanically by the name-for-name test port (every red
+ported test = one divergence to close). The rejected alternative — back-porting individual
+fixes onto our 31-event model — would have re-diverged immediately. Wave H1 sizes at 3–4
+sessions; total 5–7 accepted.
 
 ## H3. Tonight's Windows fixes vs upstream
 
@@ -216,9 +217,11 @@ implementation. It gates every harvest wave exactly as it would have gated the r
   upstream reducer/coordinator test deltas name-for-name (red tests = the ledger). Read the
   full diffs of every H1.1/H1.2 commit while writing the ledger. Output: an ordered,
   test-backed harvest queue replacing this doc's priority guesses.
-- **Wave H1 — P0 harvest (2–3 sessions):** the admission/warm-route set (H1.1) as one PR wave,
-  then the handoff/reconnect set (H1.2). Verification per item: the ported upstream test(s)
-  green + the Phase-1 harness green + the specific live repro (VB-Cable) it maps to.
+- **Wave H1 — P0 harvest (3–4 sessions; F3 resolved to wholesale event-model sync):** sync the
+  reducer/coordinator event model to upstream-current (test-port-driven, §H2.1), then land the
+  admission/warm-route set (H1.1) as one PR wave and the handoff/reconnect set (H1.2) on top.
+  Verification per item: the ported upstream test(s) green + the Phase-1 harness green + the
+  specific live repro (VB-Cable) it maps to.
 - **Wave H2 — P1 harvest (1–2 sessions):** escalation availability, buffered dead-mic
   recovery, failure-UX legibility, screen-turn unstick, expired-session rotation — filtered by
   what the H0 ledger confirms applies to our stack.
@@ -226,10 +229,10 @@ implementation. It gates every harvest wave exactly as it would have gated the r
   never freeze silently again — each voice-plane work wave starts by re-running the H1 commit
   query against `upstream/main` and triaging anything new.
 
-**Total: 4–6 agent-sessions (5–7 if F3 resolves to the wholesale event-model sync — see §H2.1).** Decision flags for Chris inside the harvest: **F1**
-(fa0046a322: adopt upstream's removal of the agent-pill voice follow-up?), **F2**
-(voiceTurnOutbox: drop vs realign), and the two upstream-contribution candidates in §H3
-(Chris-manual only).
+**Total: 5–7 agent-sessions (F3 resolved: wholesale event-model sync — §H2.1).** Remaining
+decision flags for Chris inside the harvest: **F1** (fa0046a322: adopt upstream's removal of
+the agent-pill voice follow-up?), **F2** (voiceTurnOutbox: drop vs realign), and the two
+upstream-contribution candidates in §H3 (Chris-manual only).
 
 ---
 
