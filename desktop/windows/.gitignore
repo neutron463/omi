@@ -51,7 +51,7 @@ docs/*
 !docs/multi-worktree-dev.md
 !docs/release-pipeline.md
 !docs/mac-parity-audit
-!docs/mac-turn-port-plan.md
+!docs/mac-turn-harvest-plan.md
 skills-lock.json
 
 # Visual brainstorming companion

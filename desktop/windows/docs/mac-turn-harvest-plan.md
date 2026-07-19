@@ -1,19 +1,181 @@
-# Mac-shape voice turn port plan (Windows)
+# Upstream voice-turn harvest plan (Windows)
 
-**Status: design doc, PREMISE REVISED mid-write — read §0 first. No code changes in this branch.**
-2026-07-18. Directive (Chris): *"why the hell did we invent this system, why didn't we just copy
-what worked on mac. we need to do that immediately."*
+**Status: ACTIVE plan — D0 DECIDED (Chris, 2026-07-18): Option 1, harvest upstream.**
+No code changes in this branch; doc only. Formerly `mac-turn-port-plan.md`.
 
-> **§0 finding, in one line:** Windows did NOT invent the 4-layer turn machinery — it is an
-> honest port of **upstream** Mac's current reducer design (adopted upstream 2026-07-09); the
-> "Mac has just an enum" claim came from searching the **fork's** Mac tree, which froze hours
-> before that adoption. The directive's factual premise is wrong, and the direction is now
-> **Decision Gate D0** for Chris. This doc carries both options: §1 extracts the pre-reducer
-> two-owner Mac (Option 2's spec), §0.3 outlines the fidelity-audit path (Option 1).
+> **How we got here (§0):** Windows did NOT invent the 4-layer turn machinery — it is an honest
+> port of **upstream** Mac's current reducer design (adopted upstream 2026-07-09 in
+> `0455398a27`); the "Mac has just an enum" claim came from searching the **fork's** Mac tree,
+> which froze hours before that adoption. Chris decided: stay on the reducer design,
+> **fidelity-audit our port against upstream's current Swift and harvest its fix stream.**
 
-Companion research: `desktop/windows/docs/voice-reliability-research.md` (uncommitted, primary
-checkout). Its architectural comparison (§2 there) remains useful; its claim that Mac never had
-a VoiceTurn reducer is **wrong for upstream Mac** — see §0.
+**The plan is §H1–§H4** (diff-map, fidelity-audit scope, tonight's-fixes cross-map, execution
+sequence). §§1–7 below them are retained as **historical context**: §1 is the pre-reducer Mac
+extraction (Option 2's spec, not chosen), §§4/6 the not-chosen rewrite design. §2's swap-boundary
+facts and §5's platform-adaptation table remain live references for harvest work.
+
+The Mac mini reference (`ssh omi-mac`, `~/omi` = upstream clone) runs **upstream** code — it is
+the live oracle for any "what does the current design actually do" question.
+
+---
+
+## H1. The diff-map — upstream's voice-plane commits since our freeze
+
+**Freeze point (mechanical):** the Windows port's Mac reference was tag **v0.12.72 =
+`50d264c94`** (2026-07-12 10:47 UTC; cited in `track2-groundtruth/02b-a5-port-plan.md`). Of the
+66 upstream commits touching `VoiceTurn*` / `PushToTalkManager.swift` /
+`RealtimeHubController*` / `PTTVoiceOutputCoordinator.swift` since `0455398a27`: **16 are
+ancestors of the freeze** (in the port's base) and **50 landed after** — the harvest candidate
+set below (grouped by thread, oldest first within each).
+
+Windows-status vocabulary: `absent` = not in our port (verified or by freeze-date), `n/a` =
+Mac-only surface, `divergent` = we solved the same class differently, `audit` = presence
+unknown, resolve in §H2. Priority: **P0** = fixes a bug class we've hit · **P1** = hardening
+we want · **P2** = unrelated evolution / Swift-structural.
+
+### H1.1 Hub admission & warm-route (the "turn dies while socket warms" class) — ALL P0
+
+Harvest as **one coherent set** — `3dc9a88e40` explicitly fixes a regression introduced by
+`dbd69e71c5`; cherry-picking individual commits re-creates upstream's own regression.
+
+| SHA | Date | What it does | Win status |
+|---|---|---|---|
+| `dbd69e71c5` | 07-13 | Separate transport readiness from context-bound input admission (fail closed); persist failed/interrupted turns per continuity key | absent |
+| `3dc9a88e40` | 07-14 | Re-bind the hub route at `hubReady` (the dbd69e regression stranded routes in `.hubWarmWait` → every turn during warmup died silently) | absent (we have pre-regression binding; take the *pair* semantics) |
+| `711b3a13af` | 07-13 | Typed `hubAdmissionRejected` reducer transition → bounded transcription fallback instead of stuck `finalizing+hubWarmWait`; regression test `testHubAdmissionRejectionAfterTransportReadyFallsBackAfterRelease` | **absent (verified: 0 hits in `voiceTurnMachine.ts`)** — our stuck-Listening/wedge class |
+| `a1d45ffdaa` | 07-14 | Preserve context admission during hub warmup (coordinator FIFO admission test) | absent |
+| `02cadde476` | 07-13 | Fence failed PTT context before teardown | absent |
+| `be24273360` | 07-14 | **Preserve the FIRST PTT turn while the realtime session is warming**; live screenshot supersedes stale warm screen context; Gemini pixels attached to matching function response | absent — our "first-press zero-byte audio → 400" class |
+
+### H1.2 Session handoff / reconnect / barge continuity — P0
+
+| SHA | Date | What it does | Win status |
+|---|---|---|---|
+| `a4bb0e32ad` | 07-15 | Make PTT session handoff reliable (+422 lines in hub controller, new `RealtimeHubInputAdmission.swift`, reducer changes) — the big handoff overhaul | absent |
+| `337ee3da86` | 07-15 | Preserve completed PTT reconnects (session policies + reducer) | absent |
+| `d940ca7c2d` | 07-15 | Preserve PTT handoffs across session refresh | absent |
+| `6a199477db` | 07-13 | Preserve PTT spawn authority across barges | absent |
+| `dafaeaf761` | 07-14 | Reducer fuzz invariants, ledger widen-never-narrow retention, reconnect session fencing contracts — CI nets for the hub/ordering/reconnect/idempotency bug classes | absent (tests worth porting wholesale) |
+
+### H1.3 Failure legibility & escalation — P1
+
+| SHA | Date | What it does | Win status |
+|---|---|---|---|
+| `4a966a0ebb` | 07-14 | Legible PTT failure and progress UX (phase 3; umbrella PR `9d925226b0`) | audit |
+| `30c2d6cd56` | 07-15 | Keep `ask_higher_model` available on a fresh voice session (over-strict kernel-snapshot gate → refusals) | audit |
+| `4ee0d9ac46` | 07-15 | Preserve kernel context in PTT escalation | audit |
+| `0717a09372` | 07-13 | Rotate expired OpenAI realtime sessions | divergent (our A7c idle re-warm; compare semantics) |
+| `7926056803` | 07-13 | Dead-mic recovery on the *buffered* silent-turn exits (warm-wait paths never fed the recovery policy) | audit (our capture stack differs; class applies) |
+| `fa0046a322` | 07-13 | Unify PTT listening chrome; **drop the agent-pill voice follow-up path entirely** | divergent — product change; **flag F1 for Chris**: adopt the removal on Windows or keep our follow-up |
+| `6737a32ab9` | 07-16 | Keep PTT on native voice after agent spawn; spawn receipts persistence-only (no local-TTS ack) | audit |
+| `e1a037b349` | 07-15 | Screenshot report = internal grounding, provider continues the answer (kills robotic visual read-outs); transcript correction restricted to turn-scoped OCR | audit |
+| `952fe5eb07` | 07-14 | Unstick realtime PTT screen turns (F2 stuck class) | audit |
+| `ef8104a54e` / `0a275ae59f` | 07-13/15 | QA stabilization umbrellas (chrome, pills, PTT flows / lifecycle convergence) | audit — mine for specifics during §H2, don't port blind |
+
+### H1.4 Screen-evidence freshness series — P2 (P1 only if our screen-context lane shows the same staleness bugs)
+
+`0db8494c54` prioritize live screenshots · `6ddc9d36ca` ground replies in live evidence ·
+`e46712bce0` truthful evidence receipts · `e4c16959ac` expire stale evidence · `9ac3648a14`
+close evidence turns · `fd47fe536e` make it testable (bounded protocol deadline, fail closed on
+undrained screenshot tool) · `d8e55bb402` harden contracts. Harvest as a set if at all.
+
+### H1.5 Telemetry truthfulness, tests, Swift-structural — P2
+
+- `19918f3e10` / `6893c9e16b` / `5facd24986` — truthful dead-mic/Bluetooth `capture_rebuild`
+  outcomes (+ mint 429 = retryable, worth one line in our mint path).
+- `f20b3c059e` (MIC-04 cap behavioral test) · `9ff2492429` (harness seams) — test-only.
+- `85a58a29f4` / `8230433849` / `fff4eef248` / `3d5123c215` / `447a891cec` — cross-surface
+  agent-contract convergence (Track-1 kernel territory more than voice; coordinate, don't
+  double-port).
+- `aac4e9b5b6` (07-12, **90 min after our freeze**) — voice-tools/journal convergence. **Flag
+  F2: it DELETES `RealtimeVoiceTurnOutbox.swift`**, which our `src/main/ipc/voiceTurnOutbox.ts`
+  mirrors 1:1 ("nothing consumes it yet") — do NOT wire our outbox; decide drop vs align with
+  upstream's kernel-journal path (`APIClient+KernelJournal.swift`).
+- `c7ca348b04` + `37849bc92b` + `f3c864e2f7` — RealtimeHubController god-file split (and the
+  capture-boundary regression the split caused, fixed in f3c864e2f7 — cautionary tale for any
+  Windows hubController split).
+- `ed3ccf62d7` — `VoiceTurnDomain` strict SwiftPM target: reducer/event types made
+  target-internal, drivers publish typed facts through the coordinator ("mutation authority was
+  convention-based" → enforced). The structural direction our supervisor work rhymes with;
+  guidance, not a port item.
+- `bb4c1f5547` / `d8c09ae07a` / `c50b60a28c` / `f987e9bcc4` — Swift strict-concurrency
+  migration. n/a.
+
+### H1.6 The 16 pre-freeze commits (in the port base)
+
+`6aa0e02651` harden orchestration edges · `d403072dfd` rapid-PTT continuity · `46e930357c`
+typed defaults key · `d52f80233f` local agents/yolo dev · `a448fcbcd4` Parakeet routing ·
+`4e22b07331` merge · `44c4492028` notch centering/permissions · `ed106449dc` agent control
+contracts · `135130e909` state boundaries · `4911018906` merge · `4d711b4dbe` truthful
+chat/gateway observability · `e9eb27cdc4` deterministic UI-deadline tests · `eb3a136b1d` +
+`8acba156e7` omni final dedup **by item id** · `12c694e0bf` automation/async hardening ·
+`09c0a550fe` merge.
+
+Caveat: "in the base" guarantees only that the *reducer/coordinator* port saw them. Commits on
+surfaces we built separately (PushToTalkManager-side, e.g. the omni item-id dedup) get a §H2
+spot-check, not a presumption of presence.
+
+## H2. Fidelity audit — scope and method
+
+Goal: a **divergence ledger** (one row per semantic difference) between our port and upstream's
+CURRENT Swift, not line noise.
+
+1. **Reducer:** diff `voiceTurnMachine.ts` (31 events, 9 phases, 10 deadlines, 16 terminal
+   reasons as ported) against upstream `VoiceTurnStateMachine.swift` at `upstream/main` (now
+   inside the `VoiceTurnDomain` target post-`ed3ccf62d7`). Enumerate: events added/renamed
+   (confirmed: `hubAdmissionRejected` missing on our side), deadline value changes, terminal
+   reasons/semantics changes, fence changes (re-verify the nil-identity rule survived their
+   refactors), queued-event mechanics changes.
+2. **Coordinator:** ours vs upstream `VoiceTurnCoordinator.swift` — admission FIFO, timeline,
+   `onTimelineEntry`-equivalent surface.
+3. **New upstream modules with no Windows counterpart:** `RealtimeHubInputAdmission.swift`,
+   `RealtimeHubSessionPolicies.swift`, `RealtimeHubController+ScreenEvidence.swift`,
+   `RealtimeScreenEvidence.swift` — decide map-onto-existing vs port.
+4. **Tests as the sync instrument:** upstream's `VoiceTurnReducerTests` grew from the 38 cases
+   we ported (e.g. `+510` lines in `aac4e9b5b6` era, admission tests in `711b3a13af`). Port the
+   test deltas name-for-name FIRST; every red test is a divergence-ledger row with its fix
+   commit attached. This is the mechanical core of the audit.
+5. **Behavior questions → Mac mini** (upstream code, non-GUI: named bundle + `omi-ctl` bridge +
+   `/private/tmp/omi-dev.log`), per the standing setup. Gemini barge-in live check (old gate
+   M-V1) folds in here.
+
+## H3. Tonight's Windows fixes vs upstream
+
+| Windows fix (tonight) | Upstream status | Action |
+|---|---|---|
+| #195 blind-sampler hold gates (GetAsyncKeyState/UIPI) | n/a — Mac input stack can't have it | Keep; below the turn layer |
+| #196 Gemini tool-schema sanitizer | Upstream HAS `additionalProperties` handling in `RealtimeHubTools.swift` (+ contract-fixture tests) | §H2: compare semantics; adopt their catalog-source placement if stronger (ours regressed once in the tool-loop PR precisely because it sat in the wrong layer) |
+| #197 amplitude mapper | n/a — Windows render stack | Keep |
+| #198 short-press wedge containment (drop-queued-events) | Same *symptom family* fixed differently: `711b3a13af` typed `hubAdmissionRejected` + `3dc9a88e40` route binding | Harvest upstream's mechanism (H1.1); keep our containment until their tests pass on our port, then reassess ours as redundant |
+| #199 mute-at-release | Upstream never had the bug (restore-at-release preserved through their refactors — verify in §H2) | Nothing to harvest; our fix realigned us |
+| A7c circuit recovery + `setup_rejected` close taxonomy | **Upstream lacks it** (strikes still just stop at max) | Keep — **potential upstream contribution, Chris's manual step only** (pseudonym rule: no agent ever pushes/PRs upstream) |
+| `feat/win-voice-plane-supervisor` (dataflow watchdog, flight recorder, runtime invariants, `resetVoicePlane`) | Upstream lacks; their `ed3ccf62d7` mutation-authority isolation is a cousin, not an equivalent | Keep — same contribution note as above |
+| `voiceTurnOutbox.ts` (unwired) | Upstream **deleted** its Swift original 90 min after our freeze | Flag F2 (H1.5): drop or realign — decide during H2, do not wire |
+
+## H4. Execution sequence
+
+Direction-neutral prerequisite (unchanged from §6 Phase 1): **the regression harness at the
+swap boundary** — tonight's 8-item repro catalog as hermetic tests against the CURRENT
+implementation. It gates every harvest wave exactly as it would have gated the rewrite.
+
+- **Wave H0 — fidelity audit (1 session):** run §H2, produce the divergence ledger; port the
+  upstream reducer/coordinator test deltas name-for-name (red tests = the ledger). Read the
+  full diffs of every H1.1/H1.2 commit while writing the ledger. Output: an ordered,
+  test-backed harvest queue replacing this doc's priority guesses.
+- **Wave H1 — P0 harvest (2–3 sessions):** the admission/warm-route set (H1.1) as one PR wave,
+  then the handoff/reconnect set (H1.2). Verification per item: the ported upstream test(s)
+  green + the Phase-1 harness green + the specific live repro (VB-Cable) it maps to.
+- **Wave H2 — P1 harvest (1–2 sessions):** escalation availability, buffered dead-mic
+  recovery, failure-UX legibility, screen-turn unstick, expired-session rotation — filtered by
+  what the H0 ledger confirms applies to our stack.
+- **Standing rule (proposed for AGENTS.md/CLAUDE.local.md after this lands):** the port must
+  never freeze silently again — each voice-plane work wave starts by re-running the H1 commit
+  query against `upstream/main` and triaging anything new.
+
+**Total: 4–6 agent-sessions.** Decision flags for Chris inside the harvest: **F1**
+(fa0046a322: adopt upstream's removal of the agent-pill voice follow-up?), **F2**
+(voiceTurnOutbox: drop vs realign), and the two upstream-contribution candidates in §H3
+(Chris-manual only).
 
 ---
 
@@ -49,7 +211,7 @@ a VoiceTurn reducer is **wrong for upstream Mac** — see §0.
   genuinely don't exist — the known empty-grep-≠-absence failure mode, at *remote* granularity
   (fork vs upstream), compounded by the repo's history of fork/upstream base confusion.
 
-### 0.2 DECISION GATE D0 (Chris) — which direction?
+### 0.2 Decision Gate D0 — **DECIDED: Option 1 (Chris, 2026-07-18)**. Comparison kept for the record.
 
 | | **Option 1 — stay on the reducer; fidelity-audit + harvest upstream fixes** | **Option 2 — adopt the pre-reducer two-owner shape (this doc's §1)** |
 |---|---|---|
@@ -81,7 +243,7 @@ turn layer — so Option 2 + supervisor is not naively reverting to the design u
 
 ---
 
-## 1. The pre-reducer Mac design (fork tree — this is Option 2's spec)
+## 1. HISTORICAL — the pre-reducer Mac design (fork tree; Option 2's spec, not chosen)
 
 **Provenance (per §0):** this section extracts the Mac design as of the fork's tree
 (`origin/main`, = upstream at 2026-07-09 22:15 UTC, hours before upstream adopted the reducer).
@@ -526,7 +688,7 @@ bar/pill/orb consumers unchanged.
 
 ---
 
-## 4. Target design (OPTION 2 ONLY) — one owner, Mac's vocabulary, Windows' required attachments
+## 4. HISTORICAL — Option 2 target design (not chosen)
 
 ### 4.1 Shape
 
@@ -622,11 +784,10 @@ The honest summary: Mac's *serialization* assumption ports cleanly (one renderer
 loop); Mac's *direct-write* assumptions all cross a window or process boundary and each one
 already has an established transport in the codebase — the adaptations select existing
 patterns, they do not invent coordination.
-## 6. Migration plan (OPTION 2 ONLY) — staged, revertible, gated
+## 6. HISTORICAL — Option 2 migration plan (not chosen)
 
-*(If D0 = Option 1, this section is replaced by §0.3's fidelity-audit flow; Phase 1's
-regression harness and Gates M-V1/M-V2 are shared by both options and should be built first
-regardless of the D0 outcome — they are direction-neutral.)*
+*(Superseded by §H4. Still live from this section: Phase 1's regression harness (direction-
+neutral, gates the harvest too) and Gate M-V2 (supervisor seam re-check), which carries over.)*
 
 Swap boundary (verified in §2/§4.2): gesture events in, projection store + kernel writes +
 playback out. Bar/pill/orb consumers and the main-process gesture layer do not change.
@@ -686,7 +847,9 @@ safety story) and the Phase-2 hub controller consolidation.
 
 ---
 
-## 7. Gates summary (for Chris)
+## 7. SUPERSEDED gates summary — D0 was decided (Option 1); current flags live in §H4 (F1, F2, contribution candidates). M-V1 folds into §H2 item 5; M-V2 still applies before any harvest work that touches the supervisor seam.
+
+### Original gates text (for the record)
 
 **Decision gates (need Chris):**
 
